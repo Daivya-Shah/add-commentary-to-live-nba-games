@@ -1,4 +1,4 @@
-import { AlertTriangle, Eraser, FileVideo, Radio, RotateCcw, Search, Square, UploadCloud } from "lucide-react";
+import { AlertTriangle, Eraser, FileVideo, Play, Radio, RotateCcw, Search, Square, UploadCloud, Youtube } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -14,6 +14,7 @@ import {
   formatLatency,
   formatReplayTime,
   fetchLiveTeams,
+  normalizeYouTubeVideoId,
   openLiveEventSource,
   requireBackendBaseUrl,
   searchLiveGames,
@@ -27,7 +28,8 @@ import {
   uploadLiveReplayFile,
 } from "@/lib/live";
 
-type SetupMode = "upload" | "url";
+type SetupMode = "upload" | "url" | "youtube";
+type ActiveSourceType = "replay_file" | "youtube_embed";
 
 const sourceLabel: Record<string, string> = {
   feed: "FEED",
@@ -39,7 +41,20 @@ const LiveReplay = () => {
   const [mode, setMode] = usePersistentState<SetupMode>("vision2voice.live.mode.v1", "upload");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = usePersistentState("vision2voice.live.videoUrl.v1", "");
+  const [youtubeUrl, setYoutubeUrl] = usePersistentState("vision2voice.live.youtubeUrl.v1", "");
+  const [demoFeedEvents, setDemoFeedEvents] = usePersistentState(
+    "vision2voice.live.demoFeedEvents.v1",
+    false,
+  );
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [activeSourceType, setActiveSourceType] = usePersistentState<ActiveSourceType>(
+    "vision2voice.live.activeSourceType.v1",
+    "replay_file",
+  );
+  const [activeYouTubeVideoId, setActiveYouTubeVideoId] = usePersistentState<string | null>(
+    "vision2voice.live.activeYoutubeVideoId.v1",
+    null,
+  );
   const [gameId, setGameId] = usePersistentState("vision2voice.live.gameId.v1", "");
   const [teamQuery, setTeamQuery] = usePersistentState("vision2voice.live.teamQuery.v1", "");
   const [opponentQuery, setOpponentQuery] = usePersistentState("vision2voice.live.opponentQuery.v1", "");
@@ -88,7 +103,13 @@ const LiveReplay = () => {
     };
   }, [previewUrl]);
 
-  const canStart = Boolean(gameId.trim() && startClock.trim() && (mode === "url" ? videoUrl.trim() : videoFile));
+  const youtubeVideoId = useMemo(() => normalizeYouTubeVideoId(youtubeUrl), [youtubeUrl]);
+  const canStart = Boolean(
+    gameId.trim() &&
+      (mode === "youtube"
+        ? youtubeVideoId
+        : startClock.trim() && (mode === "url" ? videoUrl.trim() : videoFile)),
+  );
   const backendReady = useMemo(() => {
     try {
       requireBackendBaseUrl();
@@ -99,10 +120,12 @@ const LiveReplay = () => {
   }, []);
 
   const isRunning = status === "running";
+  const showDemoFeedControl = mode === "youtube" && import.meta.env.DEV;
   const inBroadcast = Boolean(sessionId) || captions.length > 0 || !!previewUrl;
-  const visibleCaptions = inBroadcast
-    ? captions.filter((caption) => caption.replay_time_sec <= videoCurrentTime + 0.75)
-    : captions;
+  const visibleCaptions =
+    activeSourceType === "youtube_embed"
+      ? captions
+      : captions.filter((caption) => caption.replay_time_sec <= videoCurrentTime + 0.75);
   const latestCaption = visibleCaptions[0];
 
   useEffect(() => {
@@ -150,23 +173,34 @@ const LiveReplay = () => {
     setStatus("preparing");
 
     try {
-      const fileUrl = mode === "upload" && videoFile ? await uploadFile(videoFile) : videoUrl.trim();
+      const isYouTube = mode === "youtube";
+      const fileUrl = !isYouTube && mode === "upload" && videoFile ? await uploadFile(videoFile) : videoUrl.trim();
       if (previewUrl && previewUrl.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(mode === "upload" && videoFile ? URL.createObjectURL(videoFile) : fileUrl);
+      setPreviewUrl(isYouTube ? null : mode === "upload" && videoFile ? URL.createObjectURL(videoFile) : fileUrl);
+      setActiveSourceType(isYouTube ? "youtube_embed" : "replay_file");
+      setActiveYouTubeVideoId(isYouTube ? youtubeVideoId : null);
       setVideoCurrentTime(0);
 
       const session = await startLiveSession({
-        file_url: fileUrl,
         nba_game_id: gameId.trim(),
         start_period: Number(startPeriod) || 1,
-        start_clock: startClock.trim(),
+        start_clock: startClock.trim() || "12:00",
         cadence_sec: 3,
         window_sec: 6,
-        clock_mode: "replay_media",
+        source_type: isYouTube ? "youtube_embed" : "replay_file",
+        clock_mode: isYouTube ? "feed_live" : "replay_media",
+        ...(isYouTube
+          ? {
+              youtube_url: youtubeUrl.trim(),
+              youtube_video_id: youtubeVideoId || undefined,
+              demo_feed_events: import.meta.env.DEV && demoFeedEvents,
+            }
+          : { file_url: fileUrl }),
       });
 
       setSessionId(session.session_id);
       setStatus(session.status);
+      setActiveSourceType(session.source_type === "youtube_embed" ? "youtube_embed" : isYouTube ? "youtube_embed" : "replay_file");
       setWarnings(session.warnings || []);
       setTeams(session.team_names || []);
       setEventCount(session.event_count || 0);
@@ -192,12 +226,20 @@ const LiveReplay = () => {
     if (event.type === "tick") {
       setLiveClock(`Q${event.period} ${event.clock}`);
       setProgress(event.duration_sec ? Math.min(100, (event.replay_time_sec / event.duration_sec) * 100) : 0);
+      if (typeof event.event_count === "number") setEventCount(event.event_count);
       return;
     }
     if (event.type === "session_ready") {
       setTeams(Array.isArray(event.team_names) ? event.team_names : []);
       setWarnings(Array.isArray(event.warnings) ? event.warnings : []);
       setStatus(String(event.status || "ready"));
+      setActiveSourceType(event.source_type === "youtube_embed" ? "youtube_embed" : "replay_file");
+      return;
+    }
+    if (event.type === "connected") {
+      setTeams(Array.isArray(event.team_names) ? event.team_names : []);
+      setStatus(String(event.status || "connected"));
+      setActiveSourceType(event.source_type === "youtube_embed" ? "youtube_embed" : "replay_file");
       return;
     }
     if (event.type === "status" || event.type === "complete" || event.type === "stopped") {
@@ -267,6 +309,8 @@ const LiveReplay = () => {
     eventSourceRef.current = null;
     if (previewUrl && previewUrl.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
+    setActiveSourceType("replay_file");
+    setActiveYouTubeVideoId(null);
     clearSessionId();
     setStatus("idle");
     clearCaptions();
@@ -307,6 +351,21 @@ const LiveReplay = () => {
     void sendPlaybackControl("playing");
   };
 
+  const handleReplayPlayRequest = async () => {
+    const video = videoRef.current;
+    if (video && video.paused && !video.ended) {
+      try {
+        await video.play();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Video playback did not start";
+        setStreamError(message);
+        toast.error(message);
+        return;
+      }
+    }
+    void sendPlaybackControl("playing");
+  };
+
   const handleVideoPause = () => {
     void sendPlaybackControl("paused");
   };
@@ -334,6 +393,9 @@ const LiveReplay = () => {
 
   const teamMatchup = teams.length >= 2 ? `${teams[0]} · ${teams[1]}` : teams[0] || "AWAITING TEAMS";
   const shortSession = sessionId?.slice(0, 8).toUpperCase() || "—";
+  const youtubeEmbedSrc = activeYouTubeVideoId
+    ? `https://www.youtube.com/embed/${activeYouTubeVideoId}?enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&rel=0&modestbranding=1`
+    : null;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -384,9 +446,9 @@ const LiveReplay = () => {
 
             {/* A / SOURCE */}
             <section className="mt-12">
-              <Rule label="A / SOURCE" marker="REPLAY VIDEO" />
+              <Rule label="A / SOURCE" marker={mode === "youtube" ? "YOUTUBE FEED" : "REPLAY VIDEO"} />
               <div className="mt-6 max-w-3xl space-y-4">
-                <div className="flex border border-foreground/40">
+                <div className="grid grid-cols-3 border border-foreground/40">
                   {(["upload", "url"] as SetupMode[]).map((m) => (
                     <button
                       key={m}
@@ -402,6 +464,19 @@ const LiveReplay = () => {
                       {m === "upload" ? "UPLOAD FILE" : "PASTE URL"}
                     </button>
                   ))}
+                  <button
+                    type="button"
+                    onClick={() => setMode("youtube")}
+                    className={cn(
+                      "flex items-center justify-center gap-2 py-2.5 font-mono text-[11px] uppercase tracked tabular transition-colors",
+                      mode === "youtube"
+                        ? "bg-foreground text-background"
+                        : "text-foreground/55 hover:text-foreground",
+                    )}
+                  >
+                    <Youtube className="h-3.5 w-3.5" />
+                    YOUTUBE
+                  </button>
                 </div>
                 {mode === "upload" ? (
                   <label className="flex cursor-pointer items-center gap-3 border border-foreground/40 px-4 py-4 transition-colors hover:border-foreground">
@@ -416,6 +491,32 @@ const LiveReplay = () => {
                       onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
                     />
                   </label>
+                ) : mode === "youtube" ? (
+                  <div className="space-y-1">
+                    <Label htmlFor="youtube-url">YOUTUBE BROADCAST URL</Label>
+                    <Input
+                      id="youtube-url"
+                      value={youtubeUrl}
+                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      placeholder="HTTPS://YOUTUBE.COM/WATCH?V=…"
+                    />
+                    {youtubeUrl.trim() && !youtubeVideoId && (
+                      <p className="font-mono text-[10px] uppercase tracked text-court">
+                        ! ENTER A YOUTUBE VIDEO, EMBED, LIVE, SHORTS, OR YOUTU.BE URL.
+                      </p>
+                    )}
+                    {showDemoFeedControl && (
+                      <label className="mt-3 flex items-center gap-3 border border-foreground/25 px-3 py-2 font-mono text-[10px] uppercase tracked text-foreground/60">
+                        <input
+                          type="checkbox"
+                          checked={demoFeedEvents}
+                          onChange={(e) => setDemoFeedEvents(e.target.checked)}
+                          className="h-3.5 w-3.5 accent-current"
+                        />
+                        Demo feed events
+                      </label>
+                    )}
+                  </div>
                 ) : (
                   <div className="space-y-1">
                     <Label htmlFor="video-url">REPLAY VIDEO URL</Label>
@@ -598,11 +699,13 @@ const LiveReplay = () => {
                       onClick={handleStart}
                     >
                       <Radio />
-                      {busy ? "STARTING…" : "START REPLAY"}
+                      {busy ? "STARTING…" : mode === "youtube" ? "START LIVE FEED" : "START REPLAY"}
                     </Button>
                     {!canStart && (
                       <p className="mt-3 font-mono text-[10px] uppercase tracked text-foreground/45">
-                        — REQUIRES SOURCE, GAME ID, AND START CLOCK —
+                        {mode === "youtube"
+                          ? "— REQUIRES YOUTUBE URL AND GAME ID —"
+                          : "— REQUIRES SOURCE, GAME ID, AND START CLOCK —"}
                       </p>
                     )}
                   </div>
@@ -636,6 +739,17 @@ const LiveReplay = () => {
                 <span className="text-foreground/55">SESSION {shortSession}</span>
                 <span className="text-foreground/55">{String(eventCount).padStart(4, "0")} EVENTS</span>
                 <span className="ml-auto flex items-center gap-2">
+                  {activeSourceType === "replay_file" && sessionId && !isRunning && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!previewUrl}
+                      onClick={handleReplayPlayRequest}
+                    >
+                      <Play />
+                      PLAY
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -681,13 +795,22 @@ const LiveReplay = () => {
                     bottomLeft={<Marker tone="muted">{teamMatchup}</Marker>}
                     bottomRight={<Marker tone="muted">{shortSession}</Marker>}
                   >
-                    {previewUrl ? (
+                    {activeSourceType === "youtube_embed" && youtubeEmbedSrc ? (
+                      <iframe
+                        title="YouTube broadcast"
+                        src={youtubeEmbedSrc}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                        className="absolute inset-0 h-full w-full border-0"
+                      />
+                    ) : previewUrl ? (
                       <video
                         ref={videoRef}
                         src={previewUrl}
                         controls
                         playsInline
                         onPlay={handleVideoPlay}
+                        onPlaying={handleVideoPlay}
                         onPause={handleVideoPause}
                         onSeeking={handleVideoSeeking}
                         onSeeked={handleVideoSeeked}
@@ -727,7 +850,8 @@ const LiveReplay = () => {
                     <div className="flex items-baseline gap-3">
                       <Marker>D / CAPTION FEED</Marker>
                       <span className="font-mono text-[10px] uppercase tracked tabular text-foreground/45">
-                        {String(visibleCaptions.length).padStart(2, "0")} LINES · 3S CADENCE
+                        {String(visibleCaptions.length).padStart(2, "0")} LINES ·{" "}
+                        {activeSourceType === "youtube_embed" ? "FEED LIVE" : "3S CADENCE"}
                       </span>
                     </div>
                     <Button
@@ -743,9 +867,18 @@ const LiveReplay = () => {
                   </div>
                   <div className="min-h-0 flex-1 overflow-y-auto">
                     {visibleCaptions.length === 0 ? (
-                      <p className="px-4 py-10 text-center font-mono text-[11px] uppercase tracked text-foreground/45">
-                        — STREAMING WILL POPULATE THIS COLUMN —
-                      </p>
+                      <div className="px-4 py-10 text-center font-mono uppercase tracked text-foreground/45">
+                        <p className="text-[11px]">
+                          {activeSourceType === "youtube_embed"
+                            ? "— WAITING FOR NEW LIVE FEED EVENTS —"
+                            : "— STREAMING WILL POPULATE THIS COLUMN —"}
+                        </p>
+                        {activeSourceType === "youtube_embed" && (
+                          <p className="mt-2 text-[10px]">
+                            COMPLETED GAMES MAY STAY EMPTY.
+                          </p>
+                        )}
+                      </div>
                     ) : (
                       <ol className="divide-y divide-foreground/[var(--rule-alpha,0.18)]">
                         {visibleCaptions.map((caption, i) => (

@@ -243,12 +243,13 @@ Errors:
 
 ### `POST /live/sessions`
 
-Starts a simulated-live replay session.
+Starts a live caption session. Replay sessions use a backend-readable video file; YouTube sessions embed the player in the browser and generate captions from NBA feed events only.
 
 Request:
 
 ```json
 {
+  "source_type": "replay_file",
   "file_url": "https://example.com/replay.mp4",
   "nba_game_id": "0022300157",
   "start_period": 1,
@@ -260,15 +261,36 @@ Request:
 }
 ```
 
+YouTube Feed-Live request:
+
+```json
+{
+  "source_type": "youtube_embed",
+  "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "youtube_video_id": "dQw4w9WgXcQ",
+  "nba_game_id": "0022300157",
+  "start_period": 1,
+  "start_clock": "12:00",
+  "cadence_sec": 3,
+  "window_sec": 6,
+  "clock_mode": "feed_live",
+  "demo_feed_events": false
+}
+```
+
 Field constraints:
 
 | Field | Constraint |
 | --- | --- |
+| `source_type` | `replay_file` or `youtube_embed`. Defaults to `replay_file`. |
+| `file_url` | Required for `replay_file`; omitted for `youtube_embed`. |
+| `youtube_url` / `youtube_video_id` | At least one required for `youtube_embed`. |
+| `demo_feed_events` | Dev/test-only; backend honors it only when `LIVE_FEED_DEMO_ENABLED=1`. |
 | `start_period` | `1..10` |
 | `cadence_sec` | `1.0..10.0` |
 | `window_sec` | `2.0..20.0` |
 | `replay_speed` | `0.25..8.0` |
-| `clock_mode` | Defaults to `replay_media` for client-controlled replay playback. |
+| `clock_mode` | `replay_media` for client-controlled replay playback, `feed_live` for YouTube feed polling. |
 
 Response:
 
@@ -276,6 +298,7 @@ Response:
 {
   "session_id": "d8d3b9ef-5692-448b-b7a5-5cf606981fa5",
   "status": "running",
+  "source_type": "replay_file",
   "team_names": ["Washington Wizards", "Charlotte Hornets"],
   "event_count": 480,
   "warnings": []

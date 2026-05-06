@@ -135,8 +135,13 @@ describe("LiveReplay", () => {
 
     await waitFor(() => expect(document.querySelector("video")).toBeTruthy());
     const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "play", {
+      configurable: true,
+      value: vi.fn().mockResolvedValue(undefined),
+    });
     video.currentTime = 14;
     video.playbackRate = 1.5;
+    fireEvent.click(screen.getByRole("button", { name: /play/i }));
     fireEvent.play(video);
     fireEvent.pause(video);
 
@@ -148,6 +153,66 @@ describe("LiveReplay", () => {
         ]),
       );
     });
+  });
+
+  it("starts a YouTube feed-live session and renders the embedded player", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    class FakeEventSource {
+      onerror: (() => void) | null = null;
+      addEventListener = vi.fn();
+      close = vi.fn();
+    }
+    global.EventSource = FakeEventSource as unknown as typeof EventSource;
+
+    let sessionBody: Record<string, unknown> | null = null;
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/live/teams")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/live/sessions")) {
+        sessionBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            session_id: "session-yt",
+            status: "running",
+            source_type: "youtube_embed",
+            team_names: ["WAS", "CHA"],
+            event_count: 0,
+            warnings: [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+
+    render(
+      <MemoryRouter>
+        <LiveReplay />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /youtube/i }));
+    fireEvent.change(screen.getByLabelText(/YouTube broadcast URL/i), {
+      target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+    });
+    fireEvent.click(screen.getByLabelText(/demo feed events/i));
+    fireEvent.change(screen.getByLabelText(/NBA game id/i), { target: { value: "0022300157" } });
+    fireEvent.click(screen.getByRole("button", { name: /start live feed/i }));
+
+    await waitFor(() =>
+      expect(sessionBody).toMatchObject({
+        source_type: "youtube_embed",
+        youtube_video_id: "dQw4w9WgXcQ",
+        clock_mode: "feed_live",
+        nba_game_id: "0022300157",
+        demo_feed_events: true,
+      }),
+    );
+    expect(sessionBody).not.toHaveProperty("file_url");
+    const iframe = await screen.findByTitle("YouTube broadcast");
+    expect(iframe).toHaveAttribute("src", expect.stringContaining("/embed/dQw4w9WgXcQ"));
   });
 
   it("hides captions that are ahead of the video clock", () => {
@@ -195,5 +260,58 @@ describe("LiveReplay", () => {
 
     expect(screen.getByText(/This line is safe to show/i)).toBeInTheDocument();
     expect(screen.queryByText(/This line is still ahead/i)).not.toBeInTheDocument();
+  });
+
+  it("shows feed captions beside a restored YouTube session without video-clock filtering", () => {
+    window.localStorage.setItem("vision2voice.live.sessionId.v1", JSON.stringify("session-yt"));
+    window.localStorage.setItem("vision2voice.live.status.v1", JSON.stringify("running"));
+    window.localStorage.setItem("vision2voice.live.activeSourceType.v1", JSON.stringify("youtube_embed"));
+    window.localStorage.setItem("vision2voice.live.activeYoutubeVideoId.v1", JSON.stringify("dQw4w9WgXcQ"));
+    window.localStorage.setItem(
+      "vision2voice.live.captions.v1",
+      JSON.stringify([
+        {
+          type: "caption",
+          session_id: "session-yt",
+          event_id: "feed-1",
+          period: 1,
+          clock: "11:40",
+          event_type: "made_shot",
+          text: "A feed-grounded caption appears beside the broadcast.",
+          source: "feed",
+          confidence: 0.9,
+          model_name: "test",
+          replay_time_sec: 700,
+          latency_ms: 0,
+        },
+      ]),
+    );
+
+    render(
+      <MemoryRouter>
+        <LiveReplay />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTitle("YouTube broadcast")).toBeInTheDocument();
+    expect(screen.getByText(/A feed-grounded caption appears/i)).toBeInTheDocument();
+    expect(screen.getAllByText("FEED").length).toBeGreaterThan(0);
+  });
+
+  it("shows a feed-live empty state for restored YouTube sessions without new events", () => {
+    window.localStorage.setItem("vision2voice.live.sessionId.v1", JSON.stringify("session-yt"));
+    window.localStorage.setItem("vision2voice.live.status.v1", JSON.stringify("running"));
+    window.localStorage.setItem("vision2voice.live.activeSourceType.v1", JSON.stringify("youtube_embed"));
+    window.localStorage.setItem("vision2voice.live.activeYoutubeVideoId.v1", JSON.stringify("dQw4w9WgXcQ"));
+    window.localStorage.setItem("vision2voice.live.captions.v1", JSON.stringify([]));
+
+    render(
+      <MemoryRouter>
+        <LiveReplay />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/WAITING FOR NEW LIVE FEED EVENTS/i)).toBeInTheDocument();
+    expect(screen.getByText(/COMPLETED GAMES MAY STAY EMPTY/i)).toBeInTheDocument();
   });
 });

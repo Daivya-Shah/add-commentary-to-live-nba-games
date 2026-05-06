@@ -4,12 +4,49 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from live_game_data import LiveGameEvent
 from live_kb import PregameKnowledgeBase
 from openai_retry import with_openai_retry
+
+
+_ACTION_DETAIL_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\balley[- ]oop\b", "alley-oop finish"),
+    (r"\bputback\b|\bput back\b", "putback"),
+    (r"\btip[- ]?in\b|\btip shot\b|\btip layup\b", "tip-in"),
+    (r"\boffensive rebound\b|\boreb\b", "offensive rebound"),
+    (r"\bdefensive rebound\b|\bdreb\b", "defensive rebound"),
+    (r"\bstep[- ]?back\b.*\b(?:3pt|three|3-pointer|three-pointer)\b", "step-back three"),
+    (r"\b(?:3pt|three|3-pointer|three-pointer)\b.*\bstep[- ]?back\b", "step-back three"),
+    (r"\bpull ?up\b.*\b(?:3pt|three|3-pointer|three-pointer)\b", "pull-up three"),
+    (r"\b(?:3pt|three|3-pointer|three-pointer)\b.*\bpull ?up\b", "pull-up three"),
+    (r"\bstep[- ]?back\b", "step-back jumper"),
+    (r"\bpull ?up\b", "pull-up jumper"),
+    (r"\bdriving\b.*\bdunk\b", "driving dunk"),
+    (r"\bdriving\b.*\blayup\b", "driving layup"),
+    (r"\brunning\b.*\bdunk\b", "transition dunk"),
+    (r"\brunning\b.*\blayup\b", "transition layup"),
+    (r"\bfinger roll\b", "finger-roll finish"),
+    (r"\bfadeaway\b|\bfade away\b", "fadeaway jumper"),
+    (r"\bhook shot\b|\bjump hook\b", "hook shot"),
+    (r"\bfloater\b|\brunner\b", "floater"),
+    (r"\bturnaround\b", "turnaround jumper"),
+    (r"\bcatch and shoot\b|\bcatch-and-shoot\b", "catch-and-shoot look"),
+    (r"\bcutting\b|\bcuts? to the rim\b", "cut to the rim"),
+    (r"\bscreen\b|\bpick[- ]and[- ]roll\b|\bpick and roll\b", "screen action"),
+    (r"\bhelp defense\b|\bhelp defender\b|\bdefense collapses\b|\bcollapsing defense\b", "help defense"),
+    (r"\breset\b|\bwalks? it up\b|\bsets? the offense\b", "reset spacing"),
+    (r"\bbad pass\b|\blost ball\b", "live-ball turnover"),
+    (r"\bsteal\b|\bstolen\b", "steal"),
+    (r"\bblock\b|\bblocked\b", "block"),
+    (r"\bdunk\b|\bslam\b", "dunk"),
+    (r"\blayup\b", "layup"),
+    (r"\b(?:3pt|three|3-pointer|three-pointer)\b", "three-point look"),
+    (r"\bjump shot\b|\bjumper\b", "jumper"),
+)
 
 
 @dataclass(slots=True)
@@ -175,6 +212,7 @@ async def generate_caption_text(
     recent_captions: list[str],
     visual: VisualObservation | None,
 ) -> tuple[str, str]:
+    action_detail = action_detail_for_event(event, visual)
     if not os.getenv("OPENAI_API_KEY"):
         return template_caption(event, kb, visual), "template-live"
 
@@ -196,6 +234,7 @@ async def generate_caption_text(
         "period": event.period,
         "clock": event.clock,
         "score": event.score,
+        "action_detail": action_detail,
         "feed_context": feed_context_to_payload(context),
         "pregame_facts": facts,
         "recent_captions": recent_captions[-3:],
@@ -206,9 +245,13 @@ async def generate_caption_text(
         "Write exactly one concise live NBA caption, 10-22 words.\n"
         "Structured play-by-play is the source of truth for names, score, and outcomes. "
         "Do not invent stats, score, player names, or outcomes.\n"
+        "When action_detail is present and an exact player is provided, lead naturally with that player and move "
+        "unless recent_captions already used the same rhythm.\n"
         "When visual_evidence exists, make the caption descriptive about the player's movement, ball movement, "
         "spacing, defensive coverage, or the visible basketball action.\n"
         "Do not write a generic line that only restates the feed description when visual_evidence adds gameplay detail.\n"
+        "Do not force move detail into every caption; vary between play-by-play, movement detail, score/clock context, "
+        "and tactical context like coverage or spacing.\n"
         "Use one pregame fact only if it naturally fits. Avoid repeating recent captions.\n\n"
         f"Data:\n{json.dumps(payload, indent=2)}\n\n"
         "Return plain text only."
@@ -235,8 +278,10 @@ async def generate_context_caption_text(
     recent_captions: list[str],
     visual: VisualObservation,
 ) -> tuple[str, str]:
+    visual_action_detail = action_detail_from_text(visual.summary)
     payload: dict[str, Any] = {
         "feed_context": feed_context_to_payload(context),
+        "action_detail": visual_action_detail,
         "pregame_facts": kb.facts_for(None, context_team_name(context)),
         "recent_captions": recent_captions[-3:],
         "visual_evidence": visual.summary,
@@ -254,7 +299,8 @@ async def generate_context_caption_text(
         "No future play-by-play is provided. Do not predict or hint at upcoming outcomes.\n"
         "Do not state a specific player, scoring result, rebound, turnover, foul, assist, or made/missed shot "
         "unless it appears in an exact matched event. Here there is no exact matched event.\n"
-        "If visual_action_level is high or medium, describe only the visible current gameplay and already elapsed context.\n"
+        "If visual_action_level is high or medium, describe only the visible current gameplay, action_detail, "
+        "and already elapsed context.\n"
         "If visual_action_level is low, write analysis instead: spacing, pace, shot-clock pressure, matchup positioning, "
         "current score/time context, or tactical setup already visible.\n"
         "Avoid starting with 'Visually,' unless there is no natural feed-aware wording.\n\n"
@@ -283,14 +329,21 @@ def template_caption(
 ) -> str:
     subject = event.player_name or event.team_name or "The offense"
     desc = event.description.rstrip(".")
-    if event.event_type in {"made_shot", "missed_shot", "free_throw", "turnover", "rebound", "foul"}:
+    action_detail = action_detail_for_event(event, visual)
+    feed_line = feed_action_line(event, subject, action_detail)
+    if feed_line:
+        base = feed_line
+    elif event.event_type in {"made_shot", "missed_shot", "free_throw", "turnover", "rebound", "foul"}:
         base = f"{subject}: {desc}."
     else:
         base = f"{desc}."
+    if event.event_type in {"made_shot", "missed_shot", "free_throw", "turnover", "rebound", "foul"}:
+        base = maybe_append_score(base, event.score)
     facts = kb.facts_for(event.player_name, event.team_name, limit=1)
-    if visual and visual.summary and visual.action_level in {"high", "medium"} and len(base.split()) < 20:
+    if visual and visual.summary and visual.action_level in {"high", "medium"} and len(base.split()) < 18:
         movement = visual.summary.strip().rstrip(".")
-        base = f"{base} {movement}."
+        if movement.lower() not in base.lower():
+            base = f"{base} {movement}."
     elif facts and len(base.split()) < 17:
         base = f"{base} {facts[0]}"
     return " ".join(base.split()[:28])
@@ -300,12 +353,70 @@ def template_context_caption(context: FeedContext, visual: VisualObservation) ->
     teams = " vs. ".join(context.team_names[:2]) or "the teams"
     score = f" with the score at {context.last_score}" if context.last_score else ""
     summary = visual.summary.strip().rstrip(".") or "the possession develops"
+    action_detail = action_detail_from_text(summary)
     if visual.action_level == "low":
         setup = "settle into spacing and tempo"
         if context.nearest_prior:
             setup = "organize after the previous action"
         return f"At Q{context.period} {context.clock}{score}, {teams} {setup}, reading the current matchups."
+    if action_detail:
+        return f"At Q{context.period} {context.clock}{score}, {teams} work through {action_detail} as {summary}."
     return f"At Q{context.period} {context.clock}{score}, {teams} flow through the possession as {summary}."
+
+
+def action_detail_for_event(event: LiveGameEvent, visual: VisualObservation | None = None) -> str | None:
+    return action_detail_from_text(event.description) or action_detail_from_text(visual.summary if visual else None)
+
+
+def action_detail_from_text(text: str | None) -> str | None:
+    raw = (text or "").strip().lower()
+    if not raw:
+        return None
+    compact = re.sub(r"[^a-z0-9\s-]", " ", raw)
+    compact = re.sub(r"\s+", " ", compact)
+    for pattern, detail in _ACTION_DETAIL_PATTERNS:
+        if re.search(pattern, compact):
+            return detail
+    return None
+
+
+def feed_action_line(event: LiveGameEvent, subject: str, action_detail: str | None) -> str | None:
+    if not action_detail:
+        return None
+    team = f" for {event.team_name}" if event.team_name and event.player_name else ""
+    if action_detail == "live-ball turnover":
+        return f"{subject} turns it over on a live-ball mistake{team}."
+    if action_detail == "steal":
+        return f"{subject} comes away with the steal{team}."
+    if action_detail == "block":
+        return f"{subject} comes up with the block{team}."
+    outcome = event_outcome_phrase(event)
+    if outcome:
+        article = "" if action_detail in {"offensive rebound", "defensive rebound"} else "the "
+        return f"{subject} {outcome} {article}{action_detail}{team}."
+    return f"{subject} is in the middle of {action_detail}{team}."
+
+
+def event_outcome_phrase(event: LiveGameEvent) -> str:
+    if event.event_type == "made_shot":
+        return "finishes"
+    if event.event_type == "missed_shot":
+        return "gets to"
+    if event.event_type == "rebound":
+        return "controls"
+    if event.event_type == "turnover":
+        return "loses"
+    if event.event_type == "steal":
+        return "jumps"
+    if event.event_type == "block":
+        return "meets"
+    return ""
+
+
+def maybe_append_score(text: str, score: str | None) -> str:
+    if not score or score in text:
+        return text
+    return f"{text.rstrip('.')} and it's {score}."
 
 
 def context_team_name(context: FeedContext) -> str | None:

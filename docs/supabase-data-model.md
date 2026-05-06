@@ -84,17 +84,21 @@ Stores optional human review scores.
 
 ### `live_sessions`
 
-Stores replay session metadata.
+Stores live caption session metadata.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | UUID | Primary key. |
-| `file_url` | TEXT | Replay source URL. |
+| `file_url` | TEXT | Replay source URL; nullable for YouTube Feed-Live sessions. |
+| `source_type` | TEXT | `replay_file` or `youtube_embed`. |
+| `source_url` | TEXT | Original replay or YouTube source URL. |
+| `youtube_video_id` | TEXT | Normalized YouTube video ID when applicable. |
 | `nba_game_id` | TEXT | NBA game ID used for play-by-play lookup. |
 | `start_period` | INTEGER | Starting period for replay alignment. |
 | `start_clock` | TEXT | Starting game clock, for example `12:00`. |
 | `cadence_sec` | NUMERIC | Tick/caption cadence. |
 | `window_sec` | NUMERIC | Rolling visual window size. |
+| `clock_mode` | TEXT | `replay_media` or `feed_live`. |
 | `status` | TEXT | Session state. |
 | `warnings_json` | JSONB | Non-fatal setup warnings. |
 | `created_at` | TIMESTAMPTZ | Defaults to `now()`. |

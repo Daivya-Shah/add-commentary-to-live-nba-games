@@ -21,11 +21,15 @@ from live_state import (
     FeedContext,
     LiveStateReconciler,
     VisualObservation,
+    action_detail_from_text,
     context_team_name,
     feed_context_to_payload,
     generate_context_caption_text,
+    template_caption,
     template_context_caption,
 )
+
+os.environ["OPENAI_API_KEY"] = ""
 
 
 class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
@@ -198,6 +202,75 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("attacks downhill", decision.text)
         self.assertEqual(decision.score, "4-2")
 
+    def test_feed_event_template_calls_out_driving_layup_detail(self):
+        event = LiveGameEvent(
+            event_id="drive",
+            period=1,
+            clock="10:58",
+            game_elapsed_sec=62,
+            event_type="made_shot",
+            description="Test Player makes 2PT driving layup",
+            player_name="Test Player",
+            team_name="Test Team",
+            score="4-2",
+        )
+        kb = build_pregame_kb(LiveGamePackage(game_id="fixture"))
+
+        text = template_caption(event, kb, visual=None)
+
+        self.assertIn("Test Player", text)
+        self.assertIn("driving layup", text)
+        self.assertIn("4-2", text)
+
+    def test_action_detail_preserves_stepback_and_pullup_threes(self):
+        self.assertEqual(
+            action_detail_from_text("Stephen Curry 25' 3PT Step Back Jump Shot"),
+            "step-back three",
+        )
+        self.assertEqual(
+            action_detail_from_text("Klay Thompson makes 26-foot pullup 3PT jump shot"),
+            "pull-up three",
+        )
+
+    def test_generic_feed_event_template_stays_concise_without_invented_moves(self):
+        event = LiveGameEvent(
+            event_id="generic",
+            period=1,
+            clock="9:40",
+            game_elapsed_sec=140,
+            event_type="game_event",
+            description="Test Team gains possession",
+            team_name="Test Team",
+        )
+        kb = build_pregame_kb(LiveGamePackage(game_id="fixture"))
+
+        text = template_caption(event, kb, visual=None)
+
+        self.assertLessEqual(len(text.split()), 28)
+        self.assertNotIn("driving", text.lower())
+        self.assertNotIn("step", text.lower())
+        self.assertNotIn("pull-up", text.lower())
+
+    def test_context_template_uses_visible_action_without_naming_player(self):
+        context = FeedContext(
+            period=1,
+            clock="9:58",
+            team_names=["Home Team", "Away Team"],
+            last_score="10-8",
+        )
+        visual = VisualObservation(
+            "the offense flows into screen action as the defense trails over the top",
+            0.7,
+            changed=True,
+            action_level="medium",
+        )
+
+        text = template_context_caption(context, visual)
+
+        self.assertIn("screen action", text)
+        self.assertNotIn("Test Player", text)
+        self.assertIn("10-8", text)
+
     async def test_low_action_context_caption_shifts_to_analysis(self):
         package = LiveGamePackage(
             game_id="fixture",
@@ -312,6 +385,111 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_youtube_feed_live_emits_new_feed_event_once_without_video_download(self):
+        initial = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Test Team", abbreviation="TST")],
+            players=[LivePlayer(player_id="1", name="Test Player", team_id="1", team_name="Test Team")],
+            events=[],
+        )
+        event = LiveGameEvent(
+            event_id="evt-1",
+            period=1,
+            clock="11:59",
+            game_elapsed_sec=game_elapsed_sec(1, "11:59"),
+            event_type="made_shot",
+            description="Test Player makes 2PT layup",
+            player_name="Test Player",
+            team_name="Test Team",
+            score="2-0",
+        )
+        updated = LiveGamePackage(
+            game_id="fixture",
+            teams=initial.teams,
+            players=initial.players,
+            events=[event],
+        )
+
+        class SequenceProvider:
+            def __init__(self):
+                self.packages = [initial, updated, updated, updated]
+                self.calls = 0
+
+            def load_game(self, game_id: str) -> LiveGamePackage:
+                package = self.packages[min(self.calls, len(self.packages) - 1)]
+                self.calls += 1
+                return package
+
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=SequenceProvider(), event_sink=sink)
+        manager._visual_observation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), patch(
+            "live_sessions._download_video_temp",
+            AsyncMock(),
+        ) as download, patch("live_sessions._video_duration_sec") as duration:
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    file_url=None,
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    clock_mode="feed_live",
+                    source_type="youtube_embed",
+                    youtube_video_id="dQw4w9WgXcQ",
+                )
+            )
+            await asyncio.sleep(0.14)
+            await manager.stop_session(session.session_id)
+            await asyncio.sleep(0.04)
+
+        captions = [event for event in emitted if event.get("type") == "caption"]
+        self.assertEqual(len(captions), 1)
+        self.assertEqual(captions[0]["source"], "feed")
+        self.assertEqual(captions[0]["event_id"], "evt-1")
+        download.assert_not_awaited()
+        duration.assert_not_called()
+        manager._visual_observation.assert_not_awaited()
+
+    async def test_feed_live_demo_event_emits_visible_caption_when_enabled(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Test Team", abbreviation="TST")],
+            events=[],
+        )
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=StaticGameDataProvider(package), event_sink=sink)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "", "LIVE_FEED_DEMO_ENABLED": "1"}):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    file_url=None,
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    clock_mode="feed_live",
+                    source_type="youtube_embed",
+                    youtube_video_id="dQw4w9WgXcQ",
+                    demo_feed_events=True,
+                )
+            )
+            await asyncio.sleep(0.08)
+            await manager.stop_session(session.session_id)
+            await asyncio.sleep(0.04)
+
+        captions = [event for event in emitted if event.get("type") == "caption"]
+        self.assertEqual(len(captions), 1)
+        self.assertEqual(captions[0]["source"], "feed")
+        self.assertIn("demo feed event", captions[0]["feed_description"])
+
     async def test_session_stream_emits_caption_with_latency_metadata(self):
         package = LiveGamePackage(
             game_id="fixture",

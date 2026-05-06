@@ -30,14 +30,18 @@ logger = logging.getLogger("vision2voice.live.sessions")
 
 @dataclass(slots=True)
 class LiveSessionConfig:
-    file_url: str
     nba_game_id: str
     start_period: int
     start_clock: str
+    file_url: str | None = None
     cadence_sec: float = 3.0
     window_sec: float = 6.0
     replay_speed: float = 1.0
     clock_mode: str = "replay_media"
+    source_type: str = "replay_file"
+    youtube_url: str | None = None
+    youtube_video_id: str | None = None
+    demo_feed_events: bool = False
 
 
 @dataclass
@@ -56,6 +60,9 @@ class LiveSession:
     duration_sec: float | None = None
     replay_elapsed: float = 0.0
     playback_rate: float = 1.0
+    current_period: int = 1
+    current_clock: str = "12:00"
+    current_score: str | None = None
     playback_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -78,17 +85,22 @@ class LiveSessionManager:
             kb=kb,
             events=package.events,
             status="ready",
+            current_period=config.start_period,
+            current_clock=config.start_clock,
         )
         self.sessions[session.session_id] = session
-        session.replay_task = asyncio.create_task(self._run_replay(session))
+        session.replay_task = asyncio.create_task(self._run_session(session))
         await self._broadcast(
             session,
             {
                 "type": "session_ready",
                 "session_id": session.session_id,
                 "status": session.status,
+                "source_type": config.source_type,
                 "game_id": config.nba_game_id,
                 "file_url": config.file_url,
+                "source_url": session_source_url(config),
+                "youtube_video_id": config.youtube_video_id,
                 "start_period": config.start_period,
                 "start_clock": config.start_clock,
                 "cadence_sec": config.cadence_sec,
@@ -160,6 +172,12 @@ class LiveSessionManager:
         await self._emit_tick(session)
         return True
 
+    async def _run_session(self, session: LiveSession) -> None:
+        if session.config.clock_mode == "feed_live" or session.config.source_type == "youtube_embed":
+            await self._run_feed_live(session)
+            return
+        await self._run_replay(session)
+
     async def event_stream(self, session_id: str) -> AsyncIterator[str]:
         session = self.sessions.get(session_id)
         if not session:
@@ -172,6 +190,8 @@ class LiveSessionManager:
                 "type": "connected",
                 "session_id": session_id,
                 "status": session.status,
+                "source_type": session.config.source_type,
+                "clock_mode": session.config.clock_mode,
                 "team_names": session.kb.team_names,
             }
         )
@@ -192,6 +212,8 @@ class LiveSessionManager:
         config = session.config
         video_path = ""
         try:
+            if not config.file_url:
+                raise RuntimeError("Replay sessions require a file_url.")
             video_path = await _download_video_temp(config.file_url)
             duration = await asyncio.to_thread(_video_duration_sec, video_path)
             session.duration_sec = duration
@@ -290,6 +312,115 @@ class LiveSessionManager:
                 except OSError:
                     pass
 
+    async def _run_feed_live(self, session: LiveSession) -> None:
+        config = session.config
+        reconciler = LiveStateReconciler(session.kb)
+        reconciler.seen_event_ids.update(event.event_id for event in session.events)
+        demo_emitted = False
+        if session.events:
+            latest = session.events[-1]
+            session.current_period = latest.period
+            session.current_clock = latest.clock
+            session.current_score = latest.score
+            session.replay_elapsed = latest.game_elapsed_sec
+
+        try:
+            session.status = "running"
+            session.started_at = time.time()
+            await self._broadcast(
+                session,
+                {
+                    "type": "status",
+                    "session_id": session.session_id,
+                    "status": session.status,
+                    "source_type": config.source_type,
+                    "source_url": session_source_url(config),
+                    "youtube_video_id": config.youtube_video_id,
+                    "clock_mode": config.clock_mode,
+                },
+            )
+            await self._emit_tick(session)
+
+            while not session.stopped:
+                await asyncio.sleep(config.cadence_sec)
+                if session.stopped:
+                    break
+
+                if config.demo_feed_events and demo_feed_allowed() and not demo_emitted:
+                    demo_event = build_demo_feed_event(session)
+                    session.events = [*session.events, demo_event]
+                    session.current_period = demo_event.period
+                    session.current_clock = demo_event.clock
+                    session.current_score = demo_event.score
+                    session.replay_elapsed = demo_event.game_elapsed_sec
+                    decision = await reconciler.caption_for_feed_event(
+                        demo_event,
+                        replay_time_sec=demo_event.game_elapsed_sec,
+                        visual=None,
+                    )
+                    await self._emit_caption(session, decision)
+                    await self._emit_tick(session)
+                    demo_emitted = True
+                    continue
+
+                try:
+                    package = await asyncio.to_thread(self.provider.load_game, config.nba_game_id)
+                except Exception as exc:
+                    warning = f"NBA play-by-play poll failed: {exc}"
+                    logger.warning(warning)
+                    if warning not in session.kb.warnings:
+                        session.kb.warnings.append(warning)
+                    await self._broadcast(
+                        session,
+                        {
+                            "type": "status",
+                            "session_id": session.session_id,
+                            "status": session.status,
+                            "warning": warning,
+                            "clock_mode": config.clock_mode,
+                        },
+                    )
+                    continue
+
+                if package.teams or package.players or package.warnings:
+                    session.kb = build_pregame_kb(package)
+                session.events = package.events
+                if session.events:
+                    latest = session.events[-1]
+                    session.current_period = latest.period
+                    session.current_clock = latest.clock
+                    session.current_score = latest.score
+                    session.replay_elapsed = latest.game_elapsed_sec
+
+                feed_events = reconciler.unseen_feed_events(session.events)
+                for event in feed_events:
+                    decision = await reconciler.caption_for_feed_event(
+                        event,
+                        replay_time_sec=event.game_elapsed_sec,
+                        visual=None,
+                    )
+                    await self._emit_caption(session, decision)
+                await self._emit_tick(session)
+
+            session.ended_at = time.time()
+            session.status = "stopped"
+            await self._broadcast(
+                session,
+                {
+                    "type": "stopped",
+                    "session_id": session.session_id,
+                    "status": session.status,
+                    "clock_mode": config.clock_mode,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Feed-live session failed")
+            session.status = "error"
+            await self._broadcast(
+                session,
+                {"type": "error", "session_id": session.session_id, "error": str(exc)},
+            )
+
     async def _visual_observation(
         self,
         video_path: str,
@@ -336,20 +467,29 @@ class LiveSessionManager:
         )
 
     async def _emit_tick(self, session: LiveSession) -> None:
-        period, clock, _ = align_replay_time(
-            session.config.start_period,
-            session.config.start_clock,
-            session.replay_elapsed,
-        )
+        if session.config.clock_mode == "feed_live":
+            period = session.current_period
+            clock = session.current_clock
+        else:
+            period, clock, _ = align_replay_time(
+                session.config.start_period,
+                session.config.start_clock,
+                session.replay_elapsed,
+            )
+            session.current_period = period
+            session.current_clock = clock
         await self._broadcast(
             session,
             {
                 "type": "tick",
                 "session_id": session.session_id,
+                "source_type": session.config.source_type,
                 "replay_time_sec": session.replay_elapsed,
                 "duration_sec": session.duration_sec or 0,
                 "period": period,
                 "clock": clock,
+                "score": session.current_score,
+                "event_count": len(session.events),
                 "playback_rate": session.playback_rate,
                 "clock_mode": session.config.clock_mode,
             },
@@ -441,8 +581,10 @@ async def live_vision_summary(video_path: str, t0: float, t1: float) -> tuple[st
             "type": "text",
             "text": (
                 "Briefly describe the visible basketball action in this short live window. "
-                "Focus on what players and gameplay are doing: ball-handler/body movement, offensive spacing, "
-                "defensive coverage, screens, passes, drives, shots, rebounds, or resets. "
+                "Focus on concrete player actions and basketball moves: ball-handler body movement, "
+                "drives, pull-ups, step-backs, cuts, screens, slips, passes, shots, rebounds, loose balls, "
+                "offensive spacing, defensive coverage, help rotations, contests, and resets. "
+                "Use compact broadcast language instead of generic phrases like 'the play continues.' "
                 "Do not name a player or scoring result unless clearly visible. "
                 "Classify action_level as high for shots/drives/loose balls/fast breaks, medium for normal "
                 "half-court movement or screening, and low for resets, standing, walking, dead-ball, or sparse action. "
@@ -515,3 +657,32 @@ def build_feed_context(
 def _sse(event: dict[str, Any]) -> str:
     event_name = str(event.get("type") or "message")
     return f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
+
+
+def session_source_url(config: LiveSessionConfig) -> str | None:
+    if config.source_type == "youtube_embed":
+        return config.youtube_url or (
+            f"https://www.youtube.com/watch?v={config.youtube_video_id}" if config.youtube_video_id else None
+        )
+    return config.file_url
+
+
+def demo_feed_allowed() -> bool:
+    return os.getenv("LIVE_FEED_DEMO_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+
+
+def build_demo_feed_event(session: LiveSession) -> LiveGameEvent:
+    team_name = session.kb.team_names[0] if session.kb.team_names else "Demo Team"
+    period = session.current_period or session.config.start_period
+    clock = session.current_clock or session.config.start_clock
+    elapsed = max(session.replay_elapsed, game_elapsed_sec(period, clock)) + 0.1
+    return LiveGameEvent(
+        event_id=f"demo-feed-{session.session_id}",
+        period=period,
+        clock=clock,
+        game_elapsed_sec=elapsed,
+        event_type="made_shot",
+        description=f"{team_name} demo feed event: made jump shot",
+        team_name=team_name,
+        score=session.current_score,
+    )

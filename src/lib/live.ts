@@ -1,19 +1,24 @@
 import { getBackendBaseUrl } from "@/lib/analysis";
 
 export interface LiveSessionRequest {
-  file_url: string;
+  file_url?: string;
   nba_game_id: string;
   start_period: number;
   start_clock: string;
   cadence_sec?: number;
   window_sec?: number;
   replay_speed?: number;
-  clock_mode?: "replay_media" | string;
+  clock_mode?: "replay_media" | "feed_live" | string;
+  source_type?: "replay_file" | "youtube_embed";
+  youtube_url?: string;
+  youtube_video_id?: string;
+  demo_feed_events?: boolean;
 }
 
 export interface LiveSessionResponse {
   session_id: string;
   status: string;
+  source_type?: "replay_file" | "youtube_embed" | string;
   team_names: string[];
   event_count: number;
   warnings: string[];
@@ -84,10 +89,13 @@ export interface LiveCaptionEvent {
 export interface LiveTickEvent {
   type: "tick";
   session_id: string;
+  source_type?: string;
   replay_time_sec: number;
   duration_sec: number;
   period: number;
   clock: string;
+  score?: string | null;
+  event_count?: number;
   playback_rate?: number;
   clock_mode?: string;
 }
@@ -239,6 +247,31 @@ export function openLiveEventSource(
     onError("Live event stream disconnected.");
   };
   return source;
+}
+
+export function normalizeYouTubeVideoId(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^www\./, "").toLowerCase();
+    if (host === "youtu.be") {
+      const id = url.pathname.split("/").filter(Boolean)[0];
+      return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    }
+    if (host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com")) {
+      const fromQuery = url.searchParams.get("v");
+      if (fromQuery && /^[a-zA-Z0-9_-]{11}$/.test(fromQuery)) return fromQuery;
+      const parts = url.pathname.split("/").filter(Boolean);
+      const markerIndex = parts.findIndex((part) => ["embed", "live", "shorts"].includes(part));
+      const id = markerIndex >= 0 ? parts[markerIndex + 1] : null;
+      return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function formatLatency(ms?: number): string {

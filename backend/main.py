@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
 from jersey_resolve import enrich_timeline_segments, enrich_vision_with_nba_rosters
@@ -89,7 +89,7 @@ class VoiceoverExportBody(BaseModel):
 
 
 class LiveSessionRequest(BaseModel):
-    file_url: str
+    file_url: str | None = None
     nba_game_id: str
     start_period: int = Field(default=1, ge=1, le=10)
     start_clock: str = "12:00"
@@ -97,6 +97,23 @@ class LiveSessionRequest(BaseModel):
     window_sec: float = Field(default=6.0, ge=2.0, le=20.0)
     replay_speed: float = Field(default=1.0, ge=0.25, le=8.0)
     clock_mode: str = "replay_media"
+    source_type: str = Field(default="replay_file", pattern="^(replay_file|youtube_embed)$")
+    youtube_url: str | None = None
+    youtube_video_id: str | None = None
+    demo_feed_events: bool = False
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "LiveSessionRequest":
+        if self.source_type == "replay_file" and not (self.file_url or "").strip():
+            raise ValueError("file_url is required for replay_file live sessions.")
+        if self.source_type == "youtube_embed":
+            if not ((self.youtube_video_id or "").strip() or (self.youtube_url or "").strip()):
+                raise ValueError("youtube_url or youtube_video_id is required for youtube_embed live sessions.")
+            if self.clock_mode == "replay_media":
+                self.clock_mode = "feed_live"
+        if self.clock_mode not in {"replay_media", "feed_live"}:
+            raise ValueError("clock_mode must be replay_media or feed_live.")
+        return self
 
 
 class LivePlaybackControlRequest(BaseModel):
@@ -108,6 +125,7 @@ class LivePlaybackControlRequest(BaseModel):
 class LiveSessionResponse(BaseModel):
     session_id: str
     status: str
+    source_type: str = "replay_file"
     team_names: list[str] = Field(default_factory=list)
     event_count: int = 0
     warnings: list[str] = Field(default_factory=list)
@@ -568,23 +586,28 @@ async def persist_live_event_to_supabase(session_id: str, event: dict[str, Any])
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             if event_type == "session_ready":
-                await client.post(
+                response = await client.post(
                     f"{base}/rest/v1/live_sessions",
                     headers=headers,
                     json={
                         "id": session_id,
                         "file_url": event.get("file_url"),
+                        "source_type": event.get("source_type") or "replay_file",
+                        "source_url": event.get("source_url") or event.get("file_url"),
+                        "youtube_video_id": event.get("youtube_video_id"),
                         "nba_game_id": event.get("game_id"),
                         "start_period": event.get("start_period"),
                         "start_clock": event.get("start_clock"),
                         "cadence_sec": event.get("cadence_sec"),
                         "window_sec": event.get("window_sec"),
+                        "clock_mode": event.get("clock_mode") or "replay_media",
                         "status": event.get("status"),
                         "warnings_json": event.get("warnings") or [],
                     },
                 )
+                log_live_persist_failure(response, event_type)
             elif event_type == "caption":
-                await client.post(
+                response = await client.post(
                     f"{base}/rest/v1/live_captions",
                     headers=headers,
                     json={
@@ -606,19 +629,35 @@ async def persist_live_event_to_supabase(session_id: str, event: dict[str, Any])
                         "feed_context_json": event.get("feed_context"),
                     },
                 )
+                log_live_persist_failure(response, event_type)
             elif event_type in {"status", "complete", "stopped", "error"}:
                 status = event.get("status") or event_type
                 payload: dict[str, Any] = {"status": status}
                 if event_type in {"complete", "stopped", "error"}:
                     payload["ended_at"] = datetime.now(timezone.utc).isoformat()
-                await client.patch(
+                response = await client.patch(
                     f"{base}/rest/v1/live_sessions",
                     params={"id": f"eq.{session_id}"},
                     headers=headers,
                     json=payload,
                 )
+                log_live_persist_failure(response, event_type)
     except Exception as e:
         logger.warning("Live Supabase persist failed: %s", e)
+
+
+def log_live_persist_failure(response: httpx.Response, event_type: Any) -> None:
+    if response.status_code < 400:
+        return
+    body = response.text.strip()
+    if len(body) > 700:
+        body = f"{body[:700]}…"
+    logger.warning(
+        "Live Supabase persist failed for %s: HTTP %s %s",
+        event_type,
+        response.status_code,
+        body,
+    )
 
 
 live_sessions = LiveSessionManager(event_sink=persist_live_event_to_supabase)
@@ -770,19 +809,24 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
     try:
         session = await live_sessions.create_session(
             LiveSessionConfig(
-                file_url=body.file_url,
                 nba_game_id=body.nba_game_id,
                 start_period=body.start_period,
                 start_clock=body.start_clock,
+                file_url=body.file_url,
                 cadence_sec=body.cadence_sec,
                 window_sec=body.window_sec,
                 replay_speed=body.replay_speed,
                 clock_mode=body.clock_mode,
+                source_type=body.source_type,
+                youtube_url=body.youtube_url,
+                youtube_video_id=body.youtube_video_id,
+                demo_feed_events=body.demo_feed_events,
             )
         )
         return LiveSessionResponse(
             session_id=session.session_id,
             status=session.status,
+            source_type=session.config.source_type,
             team_names=session.kb.team_names,
             event_count=len(session.events),
             warnings=session.kb.warnings,

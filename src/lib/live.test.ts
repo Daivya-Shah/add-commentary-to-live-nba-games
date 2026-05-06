@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatLatency, formatReplayTime, uploadLiveReplayFile } from "@/lib/live";
+import { formatLatency, formatReplayTime, normalizeYouTubeVideoId, uploadLiveReplayFile } from "@/lib/live";
 
 const originalFetch = global.fetch;
 
@@ -18,6 +18,15 @@ describe("live utilities", () => {
   it("formats replay time", () => {
     expect(formatReplayTime(0)).toBe("0:00");
     expect(formatReplayTime(125)).toBe("2:05");
+  });
+
+  it("normalizes common YouTube video URLs", () => {
+    expect(normalizeYouTubeVideoId("dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(normalizeYouTubeVideoId("https://youtu.be/dQw4w9WgXcQ?t=12")).toBe("dQw4w9WgXcQ");
+    expect(normalizeYouTubeVideoId("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(normalizeYouTubeVideoId("https://www.youtube.com/embed/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(normalizeYouTubeVideoId("https://www.youtube.com/live/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(normalizeYouTubeVideoId("https://example.test/video")).toBeNull();
   });
 
   it("uploads replay files to the local backend", async () => {

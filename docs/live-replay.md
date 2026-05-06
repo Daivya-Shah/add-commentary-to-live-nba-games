@@ -1,40 +1,53 @@
-# Live Replay
+# Live Replay and YouTube Feed-Live
 
-Live Replay turns a prerecorded basketball video into a simulated live caption stream. It is available at `/live` and requires direct FastAPI mode.
+The `/live` screen supports two live-caption modes and requires direct FastAPI mode.
+
+- **Replay File:** a prerecorded basketball video is uploaded or supplied by URL, then captioned as simulated live playback.
+- **YouTube Feed-Live:** an embedded YouTube broadcast/video plays in the app while captions are generated only from NBA play-by-play feed events. Embedded YouTube sources are not downloaded, sampled, or analyzed with vision.
 
 ## Requirements
 
 - Root `.env` includes `VITE_BACKEND_URL`.
 - Backend is running and reachable from the browser.
 - `nba_api` can reach stats.nba.com.
-- Replay video is accessible by the backend, either through URL mode or local upload mode.
+- Replay File mode requires video accessible by the backend, either through URL mode or local upload mode.
 - `OPENAI_API_KEY` is optional but required for AI-generated live vision/text. Template/feed behavior can run without it.
+- YouTube Feed-Live mode requires a YouTube video ID or URL and an NBA game ID. It does not require `file_url`.
+- Local demo feed captions require `LIVE_FEED_DEMO_ENABLED=1` on the backend and the dev-only Demo feed events control in YouTube mode.
 
 ## User Flow
 
 1. Open `/live`.
-2. Choose upload mode or URL mode.
+2. Choose upload mode, URL mode, or YouTube mode.
 3. Search NBA games by team, opponent, season, and season type.
 4. Select or enter a game ID.
-5. Enter the starting period and clock for the replay.
+5. For Replay File mode, enter the starting period and clock for replay alignment.
 6. Start the session.
-7. The UI opens an SSE connection; the video player's play/pause/seek events control the replay clock.
-8. Stop the session or let the replay complete.
+7. The UI opens an SSE connection.
+8. In Replay File mode, the video player's play/pause/seek events control the replay clock.
+9. In YouTube Feed-Live mode, the backend polls NBA play-by-play and emits captions only for newly observed feed events.
+10. Stop the session or let the replay complete.
 
 ## Inputs
 
 | Input | Meaning |
 | --- | --- |
-| `file_url` | Video URL the backend can download. Local upload mode creates this URL through `/live/uploads`. |
+| `source_type` | `replay_file` or `youtube_embed`. Defaults to `replay_file`. |
+| `file_url` | Replay File video URL the backend can download. Local upload mode creates this URL through `/live/uploads`. |
+| `youtube_url` | YouTube watch/embed/live URL for YouTube Feed-Live mode. |
+| `youtube_video_id` | Normalized YouTube video ID for embedding. |
+| `demo_feed_events` | Dev/test-only feed-live demo captions when `LIVE_FEED_DEMO_ENABLED=1`. |
 | `nba_game_id` | NBA game ID used to load play-by-play and rosters. |
 | `start_period` | Period where the replay begins. |
 | `start_clock` | Game clock at replay start, for example `11:36`. |
 | `cadence_sec` | How often the replay loop emits ticks and evaluates captions. |
 | `window_sec` | Visual observation window size. |
 | `replay_speed` | Playback speed for the backend replay loop. |
-| `clock_mode` | `replay_media` means the browser video clock controls replay advancement. |
+| `clock_mode` | `replay_media` for client-controlled replay playback, or `feed_live` for NBA-feed-driven YouTube sessions. |
 
 ## Backend Session Lifecycle
+
+### Replay File
 
 1. `POST /live/sessions` creates a `LiveSession`.
 2. The manager downloads or receives the replay video.
@@ -46,7 +59,20 @@ Live Replay turns a prerecorded basketball video into a simulated live caption s
 8. The reconciler emits `caption` events when feed events or feed context justify one.
 9. The stream emits `complete`, `stopped`, or `error`.
 
-Pausing the video sends `state: "paused"` to the backend, which stops ticks and caption generation. Seeking sends the new video `currentTime`, and the backend emits a tick for the corresponding game clock before continuing.
+### YouTube Feed-Live
+
+1. `POST /live/sessions` creates a session with `source_type: "youtube_embed"` and `clock_mode: "feed_live"`.
+2. The manager loads initial NBA play-by-play and marks already-known events as seen.
+3. The browser renders the YouTube embed with `enablejsapi=1`.
+4. The backend polls NBA play-by-play every `cadence_sec`.
+5. Newly observed feed events produce `feed` captions.
+6. Ticks use the latest feed event period, clock, score, and event count.
+7. Poll failures emit warning/status events; the session does not invent captions while the feed is unavailable.
+8. The stream runs until stopped or an unrecoverable error occurs.
+
+Completed games may show an empty feed-live caption panel because existing events are seeded as already seen. In local development, enable demo feed events to verify the visible caption path without waiting for an in-progress game.
+
+In Replay File mode, pausing the video sends `state: "paused"` to the backend, which stops ticks and caption generation. Seeking sends the new video `currentTime`, and the backend emits a tick for the corresponding game clock before continuing. YouTube Feed-Live mode is driven by NBA feed polling, so YouTube player controls do not drive the backend clock.
 
 ## Feed and Vision Reconciliation
 
@@ -56,6 +82,9 @@ Live Replay prioritizes structured game data:
 - Already elapsed feed context can produce `feed_context_with_vision` captions.
 - Vision observations can support captions when `LIVE_VISION_ENABLED=1`.
 - Vision-only behavior should be cautious because official play-by-play is the source of truth.
+- YouTube Feed-Live never emits vision captions because embedded YouTube media does not expose raw frames to the app.
+
+Live captions also extract action detail from official play-by-play descriptions when available, such as driving layups, step-back threes, pull-up jumpers, alley-oops, tip-ins, rebounds, screens, help defense, or reset spacing. Replay File sessions can blend those feed cues with compact visual observations of player movement and coverage. YouTube Feed-Live captions are limited to official feed wording because the backend cannot inspect embedded YouTube video frames.
 
 The frontend displays source labels such as:
 
@@ -99,7 +128,7 @@ with:
 }
 ```
 
-Use `playing` to advance captions and `paused` to hold them at the current replay position.
+Use `playing` to advance Replay File captions and `paused` to hold them at the current replay position.
 
 ## Local Upload Mode
 
@@ -155,3 +184,14 @@ For local testing:
 ```
 
 For faster tests or fixtures, use a higher `replay_speed` and shorter video.
+
+For YouTube Feed-Live:
+
+```json
+{
+  "source_type": "youtube_embed",
+  "clock_mode": "feed_live",
+  "cadence_sec": 3,
+  "window_sec": 6
+}
+```
