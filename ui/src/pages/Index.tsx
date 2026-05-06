@@ -6,7 +6,6 @@ import UploadZone from "@/components/UploadZone";
 import ProcessingStatus, { type ProcessingStep } from "@/components/ProcessingStatus";
 import ResultsPanel from "@/components/ResultsPanel";
 import { runAnalysisPipeline, type AnalysisResult } from "@/lib/analysis";
-import { Masthead, Rule } from "@/components/almanac";
 import { usePersistentState } from "@/hooks/usePersistentState";
 
 interface OfflineAnalysisState {
@@ -91,22 +90,18 @@ const Index = () => {
   const isProcessing = !!step && step !== "complete" && step !== "error";
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <Masthead breadcrumb="00 / DESK" />
-
-      <main className="mx-auto w-full max-w-[1400px] px-6 pb-24 pt-10 sm:px-10">
+    <div className="local-minima-bg flex h-screen flex-col overflow-hidden text-foreground">
+      <main className="mx-auto h-full w-full max-w-[1400px] overflow-hidden px-6 pb-8 pt-24 sm:px-10 sm:pt-28">
         {/* Hero */}
-        <section className="grid gap-10 lg:grid-cols-[1fr_auto] lg:items-end">
+        <section className="grid justify-items-center gap-5 text-center">
           <div>
-            <h1 className="font-display text-[88px] leading-[0.82] sm:text-[128px] md:text-[180px]">
-              ANALYZE
-              <br />
-              <span className="text-court">THE PLAY.</span>
+            <h1 className="title-gradient font-display text-[clamp(72px,10vw,120px)] leading-[0.84]">
+              VISION2VOICE
             </h1>
           </div>
           <Link
             to="/live"
-            className="group inline-flex items-center gap-3 self-start border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background lg:self-end"
+            className="group inline-flex items-center gap-3 border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background"
           >
             <span className="h-2 w-2 animate-live-blink bg-court" aria-hidden />
             <span>LIVE REPLAY DESK</span>
@@ -115,11 +110,8 @@ const Index = () => {
         </section>
 
         {/* Upload */}
-        <section className="mt-16">
-          <Rule label="01 / UPLOAD" marker="DROP AREA" />
-          <div className="mt-6">
-            <UploadZone onFileSelect={processVideo} isProcessing={isProcessing || !!result} />
-          </div>
+        <section className="mt-14 sm:mt-16">
+          <UploadZone onFileSelect={processVideo} isProcessing={isProcessing || !!result} />
         </section>
 
         {/* Processing */}

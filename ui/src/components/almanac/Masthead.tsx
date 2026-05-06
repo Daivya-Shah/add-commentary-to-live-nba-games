@@ -14,7 +14,7 @@ export function Masthead({ rightSlot, className }: MastheadProps) {
   return (
     <header
       className={cn(
-        "sticky top-0 z-40 w-full bg-background/95 backdrop-blur-[2px]",
+        "sticky top-0 z-40 w-full bg-transparent",
         "border-b border-foreground/40",
         className,
       )}

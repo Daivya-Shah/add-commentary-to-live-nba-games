@@ -9,7 +9,7 @@ const NotFound = () => {
   }, [location.pathname]);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-8 bg-background px-6 text-foreground">
+    <div className="local-minima-bg flex min-h-screen flex-col items-center justify-center gap-8 px-6 text-foreground">
       <span className="font-mono text-[11px] uppercase tracked tabular text-foreground/55">
         FILE NOT FOUND / 404
       </span>

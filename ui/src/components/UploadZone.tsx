@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
+import { Upload } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Marker } from "@/components/almanac";
 
 interface UploadZoneProps {
   onFileSelect: (file: File) => void;
@@ -36,12 +36,13 @@ const UploadZone = ({ onFileSelect, isProcessing }: UploadZoneProps) => {
   return (
     <div
       className={cn(
-        "group relative w-full cursor-pointer select-none border bg-transparent transition-colors",
+        "group relative mx-auto w-full max-w-[860px] cursor-pointer select-none rounded-[8px] border bg-transparent transition-all duration-200",
+        "before:pointer-events-none before:absolute before:inset-[6px] before:rounded-[6px] before:border before:border-[#f4efe326] before:content-['']",
         isDragOver
-          ? "border-court bg-court/5"
+          ? "border-court/75 bg-court/5 shadow-[0_0_24px_rgba(146,99,255,0.35)]"
           : hover
-            ? "border-foreground"
-            : "border-foreground/40",
+            ? "border-[#f4efe380] shadow-[0_0_20px_rgba(146,99,255,0.22)]"
+            : "border-[#f4efe34d] shadow-[0_0_16px_rgba(126,86,236,0.16)]",
       )}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -61,29 +62,17 @@ const UploadZone = ({ onFileSelect, isProcessing }: UploadZoneProps) => {
         onChange={handleFileInput}
       />
 
-      <div className="absolute left-3 top-3">
-        <Marker tone={isDragOver ? "accent" : "muted"}>FIG.01 / DROP CLIP</Marker>
-      </div>
-      <div className="absolute right-3 top-3">
-        <Marker tone="muted">MP4 · MOV · WEBM</Marker>
-      </div>
-      <div className="absolute bottom-3 left-3">
-        <Marker tone="muted">{isDragOver ? "› RELEASE TO COMMIT" : "CLICK OR DRAG"}</Marker>
-      </div>
-      <div className="absolute bottom-3 right-3">
-        <Marker tone="muted">REC ●</Marker>
-      </div>
-
-      <div className="flex min-h-[320px] flex-col items-center justify-center gap-6 px-6 py-20 text-center">
-        <p className="font-display text-[64px] leading-[0.85] text-foreground sm:text-[88px] md:text-[112px]">
-          DROP THE
-          <br />
-          <span className={cn("transition-colors", isDragOver ? "text-court" : "text-foreground")}>
-            CLIP
+      <div className="flex min-h-[220px] flex-col items-center justify-center gap-3 px-6 py-12 text-center sm:min-h-[240px] sm:py-14">
+        <div className="inline-flex items-center justify-center rounded-full border border-[#f4efe359] p-5">
+          <Upload className="h-14 w-14 text-foreground" strokeWidth={2.1} />
+        </div>
+        <p className="font-body text-xs italic text-[#A99FB8] sm:text-sm">
+          <span className={cn("transition-colors", isDragOver ? "text-[#A99FB8]" : "text-[#A99FB8]")}>
+            UPLOAD THE CLIP
           </span>
         </p>
-        <p className="max-w-md font-body text-sm italic text-foreground/60">
-          A single basketball play. The desk will read it, retrieve the box score, and write the call.
+        <p className="font-mono text-[9px] uppercase tracked text-[#A99FB8] sm:text-[10px]">
+          Supported formats: MP4, MOV, WEBM
         </p>
       </div>
     </div>

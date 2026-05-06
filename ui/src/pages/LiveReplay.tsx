@@ -336,7 +336,7 @@ const LiveReplay = () => {
   const shortSession = sessionId?.slice(0, 8).toUpperCase() || "—";
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="local-minima-bg min-h-screen text-foreground">
       <Masthead
         breadcrumb="01 / LIVE REPLAY"
         rightSlot={

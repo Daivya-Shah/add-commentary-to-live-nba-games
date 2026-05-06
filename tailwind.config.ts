@@ -3,7 +3,7 @@ import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
   darkMode: ["selector", '[data-theme="dark"]'],
-  content: ["./pages/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./app/**/*.{ts,tsx}", "./src/**/*.{ts,tsx}"],
+  content: ["./pages/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./app/**/*.{ts,tsx}", "./ui/src/**/*.{ts,tsx}"],
   prefix: "",
   theme: {
     container: {
@@ -15,9 +15,9 @@ export default {
     },
     extend: {
       fontFamily: {
-        display: ['"Big Shoulders Display"', 'Impact', 'sans-serif'],
-        body: ['Newsreader', 'Georgia', 'serif'],
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        display: ['Ranade', 'Archivo', 'Inter', 'Arial', 'sans-serif'],
+        body: ['Ranade', 'Archivo', 'Inter', 'Arial', 'sans-serif'],
+        mono: ['Ranade', 'Archivo', 'Inter', 'Arial', 'sans-serif'],
       },
       colors: {
         border: "hsl(var(--border))",
@@ -65,7 +65,7 @@ export default {
         },
         ink: "#0A0A0A",
         bone: "#EDE7D9",
-        court: "#FF5B14",
+        court: "#FF6A2A",
       },
       borderRadius: {
         lg: "0",
