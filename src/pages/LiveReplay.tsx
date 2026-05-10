@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Marker, Masthead, Rule, Stage } from "@/components/almanac";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { cn } from "@/lib/utils";
@@ -146,6 +147,7 @@ const LiveReplay = () => {
     "Regular Season",
   );
   const [teamOptions, setTeamOptions] = useState<LiveTeamOption[]>([]);
+  const [teamsLoading, setTeamsLoading] = useState(true);
   const [gameResults, setGameResults] = usePersistentState<LiveGameSearchResult[]>(
     "vision2voice.live.gameResults.v1",
     [],
@@ -223,14 +225,21 @@ const LiveReplay = () => {
   );
 
   useEffect(() => {
-    if (!backendReady) return;
+    if (!backendReady) {
+      setTeamsLoading(false);
+      return;
+    }
     let cancelled = false;
+    setTeamsLoading(true);
     fetchLiveTeams()
       .then((teams) => {
         if (!cancelled) setTeamOptions(teams);
       })
       .catch(() => {
         if (!cancelled) setTeamOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setTeamsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -542,6 +551,31 @@ const LiveReplay = () => {
             ? "START LIVE FEED"
             : "START REPLAY";
   const statusLabel = startPhase === "waiting_for_video" ? "PREPARING VIDEO" : status.toUpperCase();
+  const startStageInfo: Record<"uploading" | "creating_session" | "waiting_for_video", { label: string; hint: string; progress: number }> = {
+    uploading: { label: "UPLOADING…", hint: "Sending replay file to backend.", progress: 25 },
+    creating_session: { label: "LOADING NBA FEED…", hint: "Fetching NBA play-by-play and warming the captions engine.", progress: 55 },
+    waiting_for_video: { label: "PREPARING VIDEO…", hint: "Waiting for the first stream event.", progress: 80 },
+  };
+  const showStartStage =
+    startPhase === "uploading" || startPhase === "creating_session" || startPhase === "waiting_for_video";
+  const currentStartStage = showStartStage ? startStageInfo[startPhase] : null;
+  const streamStatus: "idle" | "connecting" | "live" | "reconnecting" | "error" = !sessionId
+    ? "idle"
+    : status === "error" || startPhase === "error"
+      ? "error"
+      : streamError
+        ? "reconnecting"
+        : isRunning
+          ? "live"
+          : "connecting";
+  const streamPill: Record<typeof streamStatus, { label: string; tone: "live" | "warn" | "muted" }> = {
+    idle: { label: "OFFLINE", tone: "muted" },
+    connecting: { label: "CONNECTING", tone: "warn" },
+    live: { label: "STREAMING", tone: "live" },
+    reconnecting: { label: "RECONNECTING", tone: "warn" },
+    error: { label: "STREAM ERROR", tone: "warn" },
+  };
+  const currentStreamPill = streamPill[streamStatus];
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -685,22 +719,28 @@ const LiveReplay = () => {
                   <Marker tone="muted">SEARCH BY MATCHUP</Marker>
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1">
-                      <Label htmlFor="team-search">Team</Label>
+                      <Label htmlFor="team-search" className="flex items-center gap-2">
+                        Team
+                        {teamsLoading && <Skeleton className="h-2 w-16" aria-hidden />}
+                      </Label>
                       <Input
                         id="team-search"
                         value={teamQuery}
                         onChange={(e) => setTeamQuery(e.target.value)}
-                        placeholder="WAS"
+                        placeholder={teamsLoading ? "LOADING TEAMS…" : "WAS"}
                         list="nba-team-options"
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label htmlFor="opponent-search">Opponent</Label>
+                      <Label htmlFor="opponent-search" className="flex items-center gap-2">
+                        Opponent
+                        {teamsLoading && <Skeleton className="h-2 w-16" aria-hidden />}
+                      </Label>
                       <Input
                         id="opponent-search"
                         value={opponentQuery}
                         onChange={(e) => setOpponentQuery(e.target.value)}
-                        placeholder="CHA"
+                        placeholder={teamsLoading ? "LOADING TEAMS…" : "CHA"}
                         list="nba-team-options"
                       />
                     </div>
@@ -855,6 +895,22 @@ const LiveReplay = () => {
                       <Radio />
                       {busy ? startButtonLabel : mode === "youtube" ? "START LIVE FEED" : "START REPLAY"}
                     </Button>
+                    {currentStartStage && (
+                      <div
+                        className="mt-3 space-y-1.5"
+                        role="status"
+                        aria-live="polite"
+                        data-testid="start-stage-indicator"
+                      >
+                        <Progress value={currentStartStage.progress} />
+                        <p className="font-mono text-[10px] uppercase tracked text-foreground">
+                          {currentStartStage.label}
+                        </p>
+                        <p className="font-mono text-[10px] uppercase tracked text-foreground/55">
+                          {currentStartStage.hint}
+                        </p>
+                      </div>
+                    )}
                     {streamError && !inBroadcast && (
                       <p className="mt-3 font-mono text-[10px] uppercase tracked text-court">
                         ! {streamError}
@@ -1037,6 +1093,28 @@ const LiveReplay = () => {
                   <div className="flex items-center justify-between gap-3 border-b border-foreground/[var(--rule-alpha,0.18)] px-4 py-3">
                     <div className="flex items-baseline gap-3">
                       <Marker>D / CAPTION FEED</Marker>
+                      <span
+                        className={cn(
+                          "flex items-center gap-1.5 font-mono text-[10px] uppercase tracked tabular",
+                          currentStreamPill.tone === "live" && "text-court",
+                          currentStreamPill.tone === "warn" && "text-court",
+                          currentStreamPill.tone === "muted" && "text-foreground/45",
+                        )}
+                        role="status"
+                        aria-live="polite"
+                        data-testid="stream-status-pill"
+                      >
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "h-1.5 w-1.5",
+                            currentStreamPill.tone === "live" && "animate-live-blink bg-court",
+                            currentStreamPill.tone === "warn" && "animate-live-blink bg-court",
+                            currentStreamPill.tone === "muted" && "bg-foreground/30",
+                          )}
+                        />
+                        {currentStreamPill.label}
+                      </span>
                       <span className="font-mono text-[10px] uppercase tracked tabular text-foreground/45">
                         {String(visibleCaptions.length).padStart(2, "0")} LINES ·{" "}
                         {activeSourceType === "youtube_embed" ? "FEED LIVE" : "1S CADENCE"}

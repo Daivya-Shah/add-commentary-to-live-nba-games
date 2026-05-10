@@ -169,15 +169,26 @@ export async function startLiveSession(body: LiveSessionRequest, timeoutMs = 200
   }
 }
 
-export async function fetchLiveTeams(): Promise<LiveTeamOption[]> {
+export async function fetchLiveTeams(timeoutMs = 8000): Promise<LiveTeamOption[]> {
   const base = requireBackendBaseUrl();
-  const res = await fetch(`${base}/live/teams`);
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail = data && typeof data.detail === "string" ? data.detail : `Team lookup failed (${res.status})`;
-    throw new Error(detail);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/live/teams`, { signal: controller.signal });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = data && typeof data.detail === "string" ? data.detail : `Team lookup failed (${res.status})`;
+      throw new Error(detail);
+    }
+    return data as LiveTeamOption[];
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Team lookup timed out. Confirm the backend is reachable.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return data as LiveTeamOption[];
 }
 
 export async function uploadLiveReplayFile(file: File, timeoutMs = 90000): Promise<LiveUploadResponse> {

@@ -81,8 +81,11 @@ const ResultsPanel = ({
   const [saving, setSaving] = useState(false);
   const [voiceoverUrl, setVoiceoverUrl] = useState<string | null>(null);
   const [voiceoverBusy, setVoiceoverBusy] = useState(false);
+  const [voiceoverStage, setVoiceoverStage] = useState(0);
   const [videoTab, setVideoTab] = useState<"original" | "voiceover">("original");
   const [playheadNorm, setPlayheadNorm] = useState(0);
+  const [originalVideoReady, setOriginalVideoReady] = useState(false);
+  const [voiceoverVideoReady, setVoiceoverVideoReady] = useState(false);
 
   const backendUrl = getBackendBaseUrl();
   const timeline = result.possession_timeline;
@@ -119,6 +122,31 @@ const ResultsPanel = ({
     setVideoTab("original");
     setPlayheadNorm(0);
   }, [fileUrl, result.commentary_text, result.possession_timeline, result.segment_commentary_lines]);
+
+  useEffect(() => {
+    setOriginalVideoReady(false);
+  }, [fileUrl]);
+
+  useEffect(() => {
+    setVoiceoverVideoReady(false);
+  }, [voiceoverUrl]);
+
+  useEffect(() => {
+    if (!voiceoverBusy) {
+      setVoiceoverStage(0);
+      return;
+    }
+    const start = Date.now();
+    const tick = () => {
+      const elapsed = (Date.now() - start) / 1000;
+      if (elapsed > 14) setVoiceoverStage(2);
+      else if (elapsed > 6) setVoiceoverStage(1);
+      else setVoiceoverStage(0);
+    };
+    tick();
+    const interval = window.setInterval(tick, 500);
+    return () => window.clearInterval(interval);
+  }, [voiceoverBusy]);
 
   const handleBuildVoiceover = async () => {
     if (!backendUrl) {
@@ -251,6 +279,30 @@ const ResultsPanel = ({
             </div>
           </div>
 
+          {voiceoverBusy && (
+            <div
+              className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracked tabular"
+              role="status"
+              aria-live="polite"
+              data-testid="voiceover-stage-indicator"
+            >
+              {(["SYNTHESIZING AUDIO", "MUXING VIDEO", "FINALIZING"] as const).map((label, idx) => (
+                <span key={label} className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      idx < voiceoverStage && "text-foreground/35 line-through",
+                      idx === voiceoverStage && "text-foreground",
+                      idx > voiceoverStage && "text-foreground/30",
+                    )}
+                  >
+                    {label}
+                  </span>
+                  {idx < 2 && <span className="text-foreground/25">→</span>}
+                </span>
+              ))}
+            </div>
+          )}
+
           {!backendUrl && (
             <p className="mt-3 font-mono text-[10px] uppercase tracked text-foreground/50">
               VOICEOVER NEEDS THE PYTHON API · SET VITE_BACKEND_URL · RUN <span className="text-foreground">npm run dev:full</span>
@@ -273,7 +325,17 @@ const ResultsPanel = ({
                 onTimeUpdate={onVideoTime}
                 onSeeked={onVideoTime}
                 onLoadedMetadata={onVideoTime}
+                onCanPlay={() => setOriginalVideoReady(true)}
+                onWaiting={() => setOriginalVideoReady(false)}
               />
+              {!originalVideoReady && (
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/85"
+                >
+                  <Loader2 className="h-8 w-8 animate-spin text-foreground/40" />
+                </div>
+              )}
             </Stage>
           </TabsContent>
           <TabsContent value="voiceover" className="m-0 mt-4">
@@ -291,7 +353,17 @@ const ResultsPanel = ({
                   onTimeUpdate={onVideoTime}
                   onSeeked={onVideoTime}
                   onLoadedMetadata={onVideoTime}
+                  onCanPlay={() => setVoiceoverVideoReady(true)}
+                  onWaiting={() => setVoiceoverVideoReady(false)}
                 />
+                {!voiceoverVideoReady && (
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/85"
+                  >
+                    <Loader2 className="h-8 w-8 animate-spin text-foreground/40" />
+                  </div>
+                )}
               </Stage>
             ) : (
               <p className="border border-foreground/[var(--rule-alpha,0.18)] px-6 py-12 text-center font-mono text-[11px] uppercase tracked text-foreground/50">
