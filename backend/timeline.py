@@ -161,6 +161,45 @@ Reply with ONLY valid JSON: {{"lines": [<string>, ...]}} with exactly {n} string
     return out[:n]
 
 
+async def commentary_line_for_segment(
+    segment: dict[str, Any],
+    all_segments: list[dict[str, Any]],
+    segment_index: int,
+    *,
+    temperature: float = 0.65,
+) -> str:
+    """Generate one commentary line for a single segment (used for streaming)."""
+    if not os.getenv("OPENAI_API_KEY"):
+        return f"{segment['event_type']}: {segment['player_name']} ({segment['team_name']}) has the ball."
+
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI()
+
+    n = len(all_segments)
+    prev_ctx = json.dumps(all_segments[segment_index - 1]) if segment_index > 0 else "none"
+    next_ctx = json.dumps(all_segments[segment_index + 1]) if segment_index < n - 1 else "none"
+
+    prompt = (
+        f"NBA TV play-by-play. Write ONE sentence (max 18 words) for segment {segment_index + 1}/{n}.\n"
+        f"CURRENT: {json.dumps(segment)}\n"
+        f"PREV: {prev_ctx}\n"
+        f"NEXT: {next_ctx}\n"
+        "Rules: name the player with the ball, match event_type, broadcast style. Plain text only."
+    )
+
+    async def _call():
+        return await client.chat.completions.create(
+            model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=60,
+        )
+
+    resp = await with_openai_retry(_call, label=f"seg_line_{segment_index}")
+    line = (resp.choices[0].message.content or "").strip().strip('"').strip("'")
+    return line or f"{segment['player_name']} for {segment['team_name']}."
+
+
 def template_lines_for_timeline(segments: list[dict[str, Any]]) -> list[str]:
     return [
         f"{s['event_type']}: {s['player_name']} ({s['team_name']}) has the rock."

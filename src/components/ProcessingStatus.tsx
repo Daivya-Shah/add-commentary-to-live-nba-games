@@ -18,7 +18,7 @@ const steps = [
   { key: "uploading", label: "Uploading video" },
   { key: "processing", label: "Processing video" },
   { key: "detecting", label: "Detecting event" },
-  { key: "retrieving", label: "Retrieving player/team context" },
+  { key: "retrieving", label: "Retrieving player & team context" },
   { key: "generating", label: "Generating commentary" },
 ] as const;
 
@@ -33,9 +33,7 @@ const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
     <div className="mx-auto max-w-md py-8">
       {error ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-center">
-          <p className="font-display text-lg font-semibold text-destructive">
-            Processing Failed
-          </p>
+          <p className="font-display text-lg font-semibold text-destructive">Processing Failed</p>
           <p className="mt-1 text-sm text-muted-foreground">{error}</p>
         </div>
       ) : (
@@ -48,11 +46,7 @@ const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
               <div
                 key={step.key}
                 className={`flex items-center gap-3 rounded-lg px-4 py-3 transition-all duration-300 ${
-                  isActive
-                    ? "glass-card progress-glow"
-                    : isDone
-                    ? "opacity-60"
-                    : "opacity-30"
+                  isActive ? "glass-card progress-glow" : isDone ? "opacity-60" : "opacity-30"
                 }`}
               >
                 <div className="flex h-7 w-7 items-center justify-center rounded-full">
@@ -65,10 +59,8 @@ const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
                   )}
                 </div>
                 <span
-                  className={`font-body text-sm ${
-                    isActive
-                      ? "font-semibold text-foreground"
-                      : "text-muted-foreground"
+                  className={`text-sm ${
+                    isActive ? "font-semibold text-foreground" : "text-muted-foreground"
                   }`}
                 >
                   {step.label}

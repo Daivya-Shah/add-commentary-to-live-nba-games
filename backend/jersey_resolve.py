@@ -217,15 +217,13 @@ def enrich_vision_with_nba_rosters(
                 )
                 return vision
 
-        if _vision_named_player_specific(old_p):
-            if _normalize_person_name(old_p) != _normalize_person_name(resolved_player):
-                logger.info(
-                    "Skipping roster match: keeping vision player %r over roster %r (#%s)",
-                    old_p,
-                    resolved_player,
-                    jersey,
-                )
-                return vision
+        # Always trust jersey# + team roster over the vision model's name guess.
+        # Vision frequently hallucinates names; the roster is authoritative.
+        if _vision_named_player_specific(old_p) and _normalize_person_name(old_p) != _normalize_person_name(resolved_player):
+            logger.info(
+                "Roster override: vision said %r → roster resolves #%s as %r (%s)",
+                old_p, jersey, resolved_player, tname,
+            )
 
         vision["player_name"] = resolved_player
         vision["team_name"] = tname

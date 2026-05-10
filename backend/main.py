@@ -16,9 +16,9 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -147,7 +147,32 @@ def retrieve_context(player_name: str, team_name: str) -> dict[str, Any]:
     }
 
 
-def extract_frames(video_path: str, n: int = 16) -> list[bytes]:
+def get_video_duration(video_path: str) -> float:
+    """Return duration in seconds using OpenCV."""
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        return max(0.5, total / fps)
+    finally:
+        cap.release()
+
+
+def _fmt_time(sec: float) -> str:
+    m, s = divmod(int(sec), 60)
+    return f"{m}:{s:02d}"
+
+
+def extract_frames(
+    video_path: str,
+    n: int = 10,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    max_width: int = 640,  # 640px + "low" detail = 85 tokens/frame, better readability than 512 "high"
+) -> list[bytes]:
+    """Extract n evenly-spaced JPEG frames between start_sec and end_sec."""
     import cv2
 
     cap = cv2.VideoCapture(video_path)
@@ -155,22 +180,37 @@ def extract_frames(video_path: str, n: int = 16) -> list[bytes]:
         raise RuntimeError("Could not open video (install OpenCV codecs or use MP4/H.264)")
 
     try:
+        fps   = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        # Evenly sample from first → last frame so the model sees the whole play in time order
-        if total <= 1:
-            indices = [0]
-        else:
-            n = min(max(n, 2), total)
-            indices = sorted(
-                {min(total - 1, int(round(i * (total - 1) / (n - 1)))) for i in range(n)}
-            )
+
+        start_f = max(0, int(start_sec * fps))
+        end_f   = (int(end_sec * fps) if end_sec is not None else total) - 1
+        end_f   = min(end_f, total - 1)
+        span    = max(1, end_f - start_f + 1)
+
+        n = min(max(n, 1), span)
+        indices = sorted({
+            min(end_f, start_f + int(round(i * (span - 1) / max(n - 1, 1))))
+            for i in range(n)
+        })
+
         frames: list[bytes] = []
         for idx in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if ok and frame is not None:
-                _, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+                # Resize to max_width to control token cost while preserving detail
+                h, w = frame.shape[:2]
+                if max_width and w > max_width:
+                    scale = max_width / w
+                    frame = cv2.resize(
+                        frame,
+                        (int(w * scale), int(h * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                _, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
                 frames.append(buf.tobytes())
+
         if not frames:
             raise RuntimeError("No frames decoded from video")
         return frames
@@ -194,60 +234,96 @@ def _b64_data_url(jpeg_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
-async def vision_with_openai(frames: list[bytes]) -> dict[str, Any]:
+async def vision_with_openai(
+    frames: list[bytes],
+    *,
+    chunk_start: float = 0.0,
+    chunk_end: float | None = None,
+    total_duration: float | None = None,
+    prior_players: dict[str, dict] | None = None,  # jersey# → {name, team} from earlier chunks
+) -> dict[str, Any]:
     import asyncio
-
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI()
+    client    = AsyncOpenAI()
     img_detail = os.getenv("OPENAI_VISION_IMAGE_DETAIL", "high").lower()
     if img_detail not in ("low", "high", "auto"):
-        img_detail = "high"
+        img_detail = "high"   # high is required to read jersey numbers and chyrons
 
     nf = len(frames)
-    content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                "You analyze a short NBA/basketball TV broadcast clip. Frames run in chronological order "
-                "from the START to the END of the clip—use every frame for motion, ball, and defense.\n\n"
-                "BALL / POSSESSION: Track who has the ball at each point in time. When the ball is passed, "
-                "stolen, rebounded, or handed off, the primary player and team for that moment MUST change "
-                "to the new ball-handler.\n\n"
-                "Prioritize UNIFORM EVIDENCE:\n"
-                "- Read jersey numbers (digits on front/back; may be blurry—best effort).\n"
-                "- Describe jersey and trim COLORS (e.g. road black, home white, statement gold) for the "
-                "main player involved and defenders when visible.\n"
-                "- Use scorebug, baseline text, arena signage, or court logo text if readable to infer team.\n"
-                "- If a name is visible on the jersey back or bug, use it.\n\n"
-                "Reply with ONLY valid JSON (no markdown) and these keys:\n"
-                f'- event_type: one of {", ".join(EVENT_TYPES)} (overall dominant play or first beat)\n'
-                "- player_name: who has the ball at the START of the clip (or primary actor)\n"
-                "- team_name: their team\n"
-                "- jersey_number_primary: string, the main actor's jersey # you are most confident about, or null\n"
-                "- jersey_numbers_visible: array of strings, other visible numbers\n"
-                "- jersey_kit_description: short phrase (colors, home/away if obvious)\n"
-                "- team_name_from_visuals: team hint from uniforms/court alone (or null)\n"
-                "- team_name_from_scoreboard: exact text snippet from bug if seen (or null)\n"
-                "- team_colors_description: colors for the focal player's team\n"
-                "- confidence: 0-1\n"
-                "- visual_summary: 2-5 sentences, factual, cite jerseys/numbers/colors when possible; "
-                "must describe the SAME chronological ball/possession flow as your segments (no contradictions).\n"
-                "- segments: REQUIRED non-empty array. Each item: "
-                '{"t0": float 0-1, "t1": float 0-1, "event_type": one of EVENT_TYPES, '
-                '"player_name": string (ball-handler in [t0,t1)), "team_name": string, '
-                '"jersey_number_primary": string or null}. '
-                "Cover the full clip: first segment t0=0, last t1=1; no gaps (each t1 equals next t0). "
-                "Split when possession or clear event changes (pass, shot, rebound, steal, etc.)."
-            ),
-        }
-    ]
-    for i, fb in enumerate(frames):
-        pct = 100.0 * i / (nf - 1) if nf > 1 else 0.0
-        content.append({"type": "text", "text": f"Frame {i + 1} (~{pct:.0f}% through clip time):"})
-        content.append(
-            {"type": "image_url", "image_url": {"url": _b64_data_url(fb), "detail": img_detail}}
+    c_dur = (chunk_end - chunk_start) if (chunk_end is not None and chunk_start is not None) else 0.0
+    frame_interval = round(c_dur / max(nf - 1, 1), 2) if nf > 1 else c_dur
+
+    # Temporal context — helps the model understand how much can change between frames
+    if total_duration and total_duration > 0 and chunk_end is not None:
+        time_ctx = (
+            f"This clip covers {_fmt_time(chunk_start)}–{_fmt_time(chunk_end)} "
+            f"of a {_fmt_time(total_duration)} video. "
+            f"Frames are ~{frame_interval}s apart. "
+            f"t0/t1 in segments are 0–1 relative to THIS chunk only.\n\n"
         )
+    else:
+        time_ctx = f"Frames are ~{frame_interval}s apart.\n\n" if frame_interval > 0 else ""
+
+    # Build known-players context from earlier chunks
+    if prior_players:
+        known_lines = "\n".join(
+            f"  #{j}: {v['name']} ({v['team']})"
+            for j, v in sorted(prior_players.items())
+        )
+        known_ctx = (
+            "\n=== CONFIRMED PLAYERS — NBA ROSTER VERIFIED (MANDATORY) ===\n"
+            "These jersey→player mappings are confirmed against live NBA rosters.\n"
+            "You MUST use these EXACT names. Do NOT substitute a different name for these jersey numbers:\n"
+            + known_lines + "\n\n"
+        )
+    else:
+        known_ctx = ""
+
+    system_prompt = (
+        f"You are an NBA broadcast analyst. {nf} frames ~{frame_interval}s apart.\n"
+        f"{time_ctx}{known_ctx}"
+        "STEP 1 — READ ALL ON-SCREEN TEXT FIRST (most reliable player ID):\n"
+        "• Bottom chyron/graphic: shows player name + stats when they touch the ball "
+        "(e.g. 'LeBron James — 32 PTS 8 REB'). This is the BEST source.\n"
+        "• Scorebug: team names, scores, clock, quarter, shot clock.\n"
+        "• Replay/highlight text: player name often appears.\n"
+        "• Free-throw graphic: shows shooter's name.\n\n"
+        "STEP 2 — READ JERSEY NUMBERS (if chyron not visible):\n"
+        "• Read digits on front OR back of jersey — even partial (e.g. '2' of '#23').\n"
+        "• Read name on jersey back if visible.\n"
+        "• Note home vs away kit color to identify which team.\n\n"
+        "STEP 3 — TRACK THE BALL:\n"
+        f"• Frames are only ~{frame_interval}s apart. Any possession change you see is real.\n"
+        "• Who is TOUCHING the ball = that player has it.\n"
+        "• New segment when: pass caught, rebound grabbed, steal, shot taken.\n"
+        "• If ball not visible, keep the previous holder.\n\n"
+        "PRIORITY: chyron name > jersey back name > jersey number > Unknown.\n"
+        "Never say Unknown if ANY text on screen identifies the player.\n\n"
+        f'Reply ONLY valid JSON:\n{{"event_type":"one of {EVENT_TYPES}","player_name":"name or Unknown",'
+        '"team_name":"team or Unknown","jersey_number_primary":"# string or null",'
+        '"jersey_numbers_visible":[],"jersey_kit_description":"colors",'
+        '"team_name_from_visuals":null,"team_name_from_scoreboard":null,'
+        '"team_colors_description":"colors","confidence":0.9,'
+        '"visual_summary":"2-3 sentences citing what you read from screen",'
+        '"segments":[{"t0":0.0,"t1":1.0,"event_type":"","player_name":"","team_name":"",'
+        '"jersey_number_primary":null}],'
+        '"scoreboard":{"home_team":null,"home_score":null,"away_team":null,"away_score":null,'
+        '"quarter":null,"game_clock":null,"shot_clock":null},'
+        '"on_screen_text":{"game_title":null,"broadcaster":null,"player_stat_overlay":null,"other":[]}}}\n'
+        "segments: t0=0 to t1=1 no gaps, split at every possession change."
+    )
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": system_prompt}]
+    for i, fb in enumerate(frames):
+        t_frac = i / (nf - 1) if nf > 1 else 0.0
+        wall   = chunk_start + t_frac * c_dur if c_dur > 0 else 0.0
+        label  = (
+            f"Frame {i+1}/{nf} — {_fmt_time(wall)} in video (~{t_frac*100:.0f}% into this chunk):"
+            if total_duration else f"Frame {i+1}/{nf} (~{t_frac*100:.0f}%):"
+        )
+        content.append({"type": "text", "text": label})
+        content.append({"type": "image_url", "image_url": {"url": _b64_data_url(fb), "detail": img_detail}})
 
     async def _vision_call():
         return await client.chat.completions.create(
@@ -258,52 +334,78 @@ async def vision_with_openai(frames: list[bytes]) -> dict[str, Any]:
         )
 
     resp = await with_openai_retry(_vision_call, label="vision")
-    raw = resp.choices[0].message.content or "{}"
+    raw  = resp.choices[0].message.content or "{}"
     data: dict[str, Any] = json.loads(raw)
 
     et = data.get("event_type", "Other")
-    if et not in EVENT_TYPES:
-        data["event_type"] = "Other"
-    else:
-        data["event_type"] = et
-
-    data["player_name"] = str(data.get("player_name", "Unknown")).strip() or "Unknown"
-    data["team_name"] = str(data.get("team_name", "Unknown")).strip() or "Unknown"
+    data["event_type"]    = et if et in EVENT_TYPES else "Other"
+    data["player_name"]   = str(data.get("player_name", "Unknown")).strip() or "Unknown"
+    data["team_name"]     = str(data.get("team_name", "Unknown")).strip() or "Unknown"
     try:
         data["confidence"] = float(data.get("confidence", 0.5))
     except (TypeError, ValueError):
         data["confidence"] = 0.5
     data["visual_summary"] = str(data.get("visual_summary", "")).strip() or "No summary produced."
 
+    # Parse scoreboard (tolerate type mismatches gracefully)
+    raw_sb  = data.get("scoreboard") or {}
+    scoreboard: dict[str, Any] = {
+        "home_team":   raw_sb.get("home_team"),
+        "home_score":  _safe_int(raw_sb.get("home_score")),
+        "away_team":   raw_sb.get("away_team"),
+        "away_score":  _safe_int(raw_sb.get("away_score")),
+        "quarter":     raw_sb.get("quarter"),
+        "game_clock":  raw_sb.get("game_clock"),
+        "shot_clock":  _safe_int(raw_sb.get("shot_clock")),
+    }
+    has_scoreboard = any(v is not None for v in scoreboard.values())
+
+    raw_ost = data.get("on_screen_text") or {}
+    on_screen: dict[str, Any] = {
+        "game_title":          raw_ost.get("game_title"),
+        "broadcaster":         raw_ost.get("broadcaster"),
+        "player_stat_overlay": raw_ost.get("player_stat_overlay"),
+        "other":               [str(x) for x in (raw_ost.get("other") or []) if x],
+    }
+    has_on_screen = any(v for v in on_screen.values())
+
     valid_events = set(EVENT_TYPES)
-    raw_segs = data.get("segments")
-    segments_in: list[dict[str, Any]] = raw_segs if isinstance(raw_segs, list) else []
-    segments = normalize_timeline(segments_in, data, valid_events)
+    segments = normalize_timeline(
+        data.get("segments") if isinstance(data.get("segments"), list) else [],
+        data,
+        valid_events,
+    )
 
     nba_on = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
     if nba_on and segments:
         await asyncio.to_thread(enrich_timeline_segments, segments)
-
     if segments:
         s0 = segments[0]
-        data["event_type"] = s0["event_type"]
+        data["event_type"]  = s0["event_type"]
         data["player_name"] = s0["player_name"]
-        data["team_name"] = s0["team_name"]
-        jp = s0.get("jersey_number_primary")
-        if jp:
-            data["jersey_number_primary"] = jp
-
+        data["team_name"]   = s0["team_name"]
+        if s0.get("jersey_number_primary"):
+            data["jersey_number_primary"] = s0["jersey_number_primary"]
     if nba_on:
         await asyncio.to_thread(enrich_vision_with_nba_rosters, data)
 
     return {
-        "event_type": data["event_type"],
-        "player_name": data["player_name"],
-        "team_name": data["team_name"],
-        "confidence": max(0.0, min(1.0, float(data["confidence"]))),
+        "event_type":    data["event_type"],
+        "player_name":   data["player_name"],
+        "team_name":     data["team_name"],
+        "confidence":    max(0.0, min(1.0, float(data["confidence"]))),
         "visual_summary": data["visual_summary"],
-        "segments": segments,
+        "segments":      segments,
+        "scoreboard":    scoreboard if has_scoreboard else None,
+        "on_screen_text": on_screen if has_on_screen else None,
     }
+
+
+def _safe_int(v: Any) -> int | None:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def vision_fallback() -> dict[str, Any]:
@@ -493,7 +595,7 @@ async def persist_to_supabase(
 async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> AnalysisResult:
     path = await download_video(file_url)
     try:
-        frames = extract_frames(path, n=int(os.getenv("FRAME_SAMPLE_COUNT", "16")))
+        frames = extract_frames(path, n=int(os.getenv("FRAME_SAMPLE_COUNT", "10")))
     finally:
         try:
             os.remove(path)
@@ -549,9 +651,436 @@ async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> An
     )
 
 
+def _sse(event_type: str, data: dict[str, Any]) -> str:
+    return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _process_local_video(path: str, clip_id: str):
+    """
+    Core SSE generator — analyzes a local video file in 45-second chunks.
+    Caller must delete the file after consuming the generator.
+    """
+    from timeline import (
+        commentary_lines_for_timeline,
+        template_lines_for_timeline,
+        visual_summary_from_timeline,
+    )
+
+    CHUNK_THRESHOLD = float(os.getenv("CHUNK_THRESHOLD_SEC", "20"))
+    CHUNK_SIZE      = float(os.getenv("CHUNK_SIZE_SEC", "15"))
+
+    yield _sse("status", {"step": "reading", "message": "Reading video…"})
+    duration = get_video_duration(path)
+
+    if duration <= CHUNK_THRESHOLD:
+        chunks = [(0.0, duration)]
+    else:
+        chunks, t = [], 0.0
+        while t < duration - 0.5:
+            chunks.append((t, min(duration, t + CHUNK_SIZE)))
+            t += CHUNK_SIZE
+    n_chunks = len(chunks)
+
+    yield _sse("video_info", {"duration": round(duration, 2), "total_chunks": n_chunks})
+
+    all_segments:     list[dict[str, Any]] = []
+    all_lines:        list[str]            = []
+    seen_players:     set[str]             = set()
+    all_players_stats: list[dict[str, Any]] = []
+    best_scoreboard:  dict[str, Any] | None = None
+    best_on_screen:   dict[str, Any] | None = None
+    vision_model      = "fallback"
+    last_structured:  dict[str, Any] = {}
+    n_frames = int(os.getenv("FRAME_SAMPLE_COUNT", "10"))
+
+    # Jersey → player cache: once #23 = LeBron James is seen anywhere, never call it Unknown again
+    # key = jersey number string, value = {"name": ..., "team": ...}
+    jersey_cache: dict[str, dict[str, str]] = {}
+
+    for chunk_idx, (c_start, c_end) in enumerate(chunks):
+        label  = f"{_fmt_time(c_start)}–{_fmt_time(c_end)}"
+        suffix = f" (chunk {chunk_idx+1}/{n_chunks})" if n_chunks > 1 else ""
+
+        yield _sse("status", {
+            "step": "vision",
+            "message": f"Analyzing {label}{suffix}…",
+            "chunk_index": chunk_idx, "chunk_total": n_chunks,
+            "chunk_start": c_start,   "chunk_end":   c_end,
+        })
+
+        frames = extract_frames(path, n=n_frames, start_sec=c_start, end_sec=c_end)
+
+        if os.getenv("OPENAI_API_KEY"):
+            structured = await vision_with_openai(
+                frames,
+                chunk_start=c_start,
+                chunk_end=c_end,
+                total_duration=duration,
+                prior_players=jersey_cache if jersey_cache else None,
+            )
+            vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+        else:
+            structured = vision_fallback()
+
+        last_structured = structured
+
+        # ── jersey cache: learn from this chunk ─────────────────────────────
+        for seg in (structured.get("segments") or []):
+            j = seg.get("jersey_number_primary")
+            nm = str(seg.get("player_name", "")).strip()
+            tm = str(seg.get("team_name", "")).strip()
+            if j and nm and nm.lower() not in ("unknown", ""):
+                jersey_cache[j] = {"name": nm, "team": tm}
+
+        # Also learn from vision-level fields (sometimes more reliable)
+        primary_j = structured.get("jersey_number_primary")
+        primary_nm = str(structured.get("player_name", "")).strip()
+        primary_tm = str(structured.get("team_name", "")).strip()
+        if primary_j and primary_nm and primary_nm.lower() not in ("unknown", ""):
+            jersey_cache[primary_j] = {"name": primary_nm, "team": primary_tm}
+
+        c_dur = max(c_end - c_start, 0.001)
+        global_segs: list[dict[str, Any]] = []
+        for seg in (structured.get("segments") or []):
+            t0g = (c_start + seg["t0"] * c_dur) / duration
+            t1g = (c_start + seg["t1"] * c_dur) / duration
+            global_segs.append({**seg, "t0": round(t0g, 6), "t1": round(t1g, 6)})
+
+        sb = structured.get("scoreboard")
+        if sb and (sb.get("home_score") is not None or sb.get("away_score") is not None):
+            best_scoreboard = sb
+        elif sb and best_scoreboard is None:
+            best_scoreboard = sb
+
+        ost = structured.get("on_screen_text")
+        if ost and any(ost.values()):
+            if best_on_screen is None:
+                best_on_screen = ost
+            else:
+                for k, v in ost.items():
+                    if v and not best_on_screen.get(k):
+                        best_on_screen[k] = v
+
+        yield _sse("vision_chunk", {
+            "chunk_index": chunk_idx, "chunk_total": n_chunks,
+            "chunk_start": c_start,   "chunk_end":   c_end,
+            "event_type":  structured["event_type"],
+            "player_name": structured["player_name"],
+            "team_name":   structured["team_name"],
+            "confidence":  structured["confidence"],
+            "segments":    global_segs,
+            "scoreboard":  best_scoreboard,
+            "on_screen_text": best_on_screen,
+        })
+
+        yield _sse("status", {
+            "step": "commentary",
+            "message": f"Generating commentary for {label}{suffix}…",
+            "chunk_index": chunk_idx, "chunk_total": n_chunks,
+        })
+
+        # ── apply jersey cache BEFORE commentary so names are correct in text ─
+        # Fixes any remaining Unknowns using names already confirmed this video.
+        # Never let a segment overwrite the cache — roster-resolved names win.
+        for seg in global_segs:
+            j = seg.get("jersey_number_primary")
+            if j and jersey_cache.get(j):
+                cached = jersey_cache[j]
+                if not seg.get("player_name") or seg["player_name"].lower() == "unknown":
+                    seg["player_name"] = cached["name"]
+                    seg["team_name"]   = cached["team"]
+
+        if os.getenv("OPENAI_API_KEY") and global_segs:
+            chunk_lines = await commentary_lines_for_timeline(global_segs, temperature=0.65)
+        else:
+            chunk_lines = template_lines_for_timeline(global_segs)
+
+        # Retroactively patch already-emitted segments whose jersey is now resolved
+        for prev_seg in all_segments[-20:]:
+            pj = prev_seg.get("jersey_number_primary")
+            if pj and jersey_cache.get(pj) and prev_seg.get("player_name", "").lower() == "unknown":
+                prev_seg["player_name"] = jersey_cache[pj]["name"]
+                prev_seg["team_name"]   = jersey_cache[pj]["team"]
+
+        base_i = len(all_segments)
+        for i, (seg, line) in enumerate(zip(global_segs, chunk_lines)):
+            yield _sse("segment", {"index": base_i + i, "line": line, "segment": seg})
+
+        all_segments.extend(global_segs)
+        all_lines.extend(chunk_lines)
+
+        for seg in global_segs:
+            name = str(seg.get("player_name", "")).strip()
+            if name and name.lower() != "unknown" and name not in seen_players:
+                seen_players.add(name)
+                ctx = retrieve_context(name, str(seg.get("team_name", "")))
+                all_players_stats.append({
+                    "player_name":   name,
+                    "team_name":     str(seg.get("team_name", "")),
+                    "jersey_number": seg.get("jersey_number_primary"),
+                    "player_stats":  ctx.get("player_stats") or {},
+                    "team_stats":    ctx.get("team_stats")   or {},
+                })
+
+    sample_segs  = (all_segments[:3] + all_segments[-3:]) if len(all_segments) > 6 else all_segments
+    sample_lines = (all_lines[:3]    + all_lines[-3:])    if len(all_lines)    > 6 else all_lines
+    visual_summary = await visual_summary_from_timeline(
+        sample_segs, sample_lines, last_structured.get("visual_summary", "")
+    )
+
+    text_model = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+    primary    = all_players_stats[0] if all_players_stats else {}
+    rc         = {"player_stats": primary.get("player_stats") or None,
+                  "team_stats":   primary.get("team_stats")   or None}
+    first_seg  = all_segments[0] if all_segments else {}
+
+    full_result = AnalysisResult(
+        event_type         = first_seg.get("event_type", "Other"),
+        player_name        = first_seg.get("player_name", "Unknown"),
+        team_name          = first_seg.get("team_name",  "Unknown"),
+        confidence         = max(0.0, min(1.0, last_structured.get("confidence", 0.5))),
+        visual_summary     = visual_summary,
+        retrieved_context  = rc if (rc["player_stats"] or rc["team_stats"]) else None,
+        commentary_text    = " ".join(all_lines),
+        model_name         = f"{vision_model}+stream+{text_model}+{n_chunks}ch",
+        possession_timeline        = all_segments,
+        segment_commentary_lines   = all_lines,
+    )
+    # Only persist to Supabase when we have a real clip UUID (not the direct-upload path)
+    if clip_id and clip_id not in ("local", ""):
+        await persist_to_supabase(clip_id, full_result, commentary_only=False)
+
+    yield _sse("complete", {
+        "commentary_text":          full_result.commentary_text,
+        "segment_commentary_lines": all_lines,
+        "visual_summary":           visual_summary,
+        "players_stats":            all_players_stats,
+        "scoreboard":               best_scoreboard,
+        "on_screen_text":           best_on_screen,
+        "model_name":               full_result.model_name,
+        "duration":                 round(duration, 2),
+        "chunks_processed":         n_chunks,
+    })
+
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
+
+
+@app.post("/analyze-stream")
+async def analyze_stream(body: ClipRequest) -> StreamingResponse:
+    """SSE: download video from URL, then process in chunks."""
+    async def generate():
+        path: str | None = None
+        try:
+            yield _sse("status", {"step": "downloading", "message": "Downloading video…"})
+            path = await download_video(body.file_url)
+            async for event in _process_local_video(path, body.clip_id):
+                yield event
+        except Exception as exc:
+            logger.exception("analyze-stream failed")
+            yield _sse("error", {"message": str(exc)})
+        finally:
+            if path:
+                try: os.remove(path)
+                except OSError: pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@app.post("/upload-analyze-stream")
+async def upload_analyze_stream(
+    request: Request,
+    clip_id: str = Query(default="local"),
+) -> StreamingResponse:
+    """
+    SSE: receive a raw video body and analyze it — no python-multipart needed,
+    no Supabase storage, no file-size limits.
+    Frontend sends: POST /upload-analyze-stream?clip_id=local  with body = raw file bytes.
+    """
+    fd, saved_path = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    try:
+        # Stream body straight to disk — never buffers the whole file in RAM
+        with open(saved_path, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+    except Exception as e:
+        try: os.remove(saved_path)
+        except OSError: pass
+        raise HTTPException(status_code=500, detail=f"Failed to save video: {e}") from e
+
+    async def generate():
+        try:
+            async for event in _process_local_video(saved_path, clip_id):
+                yield event
+        except Exception as exc:
+            logger.exception("upload-analyze-stream failed")
+            yield _sse("error", {"message": str(exc)})
+        finally:
+            try: os.remove(saved_path)
+            except OSError: pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+class FrameRequest(BaseModel):
+    frame_data: str          # base64-encoded JPEG from the browser canvas
+    timestamp: float = 0.0   # current video time in seconds
+    duration: float  = 0.0   # total video duration
+    prev_player: str | None = None   # previous ball-handler for continuity
+    prev_jersey: str | None = None
+    prev_team:   str | None = None
+
+
+class PlayerStatsRequest(BaseModel):
+    player_name: str
+    team_name:   str = ""
+
+
+async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
+    """Analyze a single browser-captured frame: who has the ball right now?"""
+    from openai import AsyncOpenAI
+    import asyncio
+
+    client     = AsyncOpenAI()
+    img_bytes  = base64.b64decode(body.frame_data)
+    img_b64    = base64.standard_b64encode(img_bytes).decode("ascii")
+    time_str   = f"{int(body.timestamp // 60)}:{int(body.timestamp % 60):02d}"
+
+    # Context from previous frame so model doesn't lose the ball unnecessarily
+    ctx = ""
+    if body.prev_player and body.prev_player.lower() not in ("", "unknown"):
+        jersey_hint = f" (#{body.prev_jersey})" if body.prev_jersey else ""
+        ctx = (
+            f"\nCONTEXT: In the previous frame, {body.prev_player}{jersey_hint} "
+            f"of {body.prev_team or 'Unknown'} had the ball. "
+            "Only change ball-handler if you clearly see possession transfer in THIS frame."
+        )
+
+    prompt = (
+        f"NBA broadcast frame at {time_str}.{ctx}\n\n"
+        "WHO HAS THE BALL RIGHT NOW?\n"
+        "- Dribbling → that player\n"
+        "- Just shot → shooter\n"
+        "- Pass in air → passer\n"
+        "- Catching → receiver\n"
+        "- Loose/not visible → Unknown\n\n"
+        "Read jersey number (front or back). Read scorebug if visible.\n\n"
+        "JSON only:\n"
+        '{"player_name":"Name or Unknown","jersey_number":"# or null","team_name":"team or Unknown",'
+        f'"event_type":"one of {EVENT_TYPES}","confidence":0.0-1.0,'
+        '"commentary":"max 10 words broadcast style",'
+        '"scoreboard":{"home_team":null,"home_score":null,"away_team":null,"away_score":null,"quarter":null,"game_clock":null,"shot_clock":null},'
+        '"on_screen_text":{"game_title":null,"broadcaster":null,"player_stat_overlay":null,"other":[]}}'
+    )
+
+    async def _call():
+        return await client.chat.completions.create(
+            model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{img_b64}",
+                    "detail": "high",  # high detail needed for jersey numbers
+                }},
+            ]}],
+            response_format={"type": "json_object"},
+            max_tokens=200,  # short response = faster
+        )
+
+    resp = await with_openai_retry(_call, label="frame_analysis")
+    raw  = resp.choices[0].message.content or "{}"
+    data: dict[str, Any] = json.loads(raw)
+
+    player  = str(data.get("player_name", "Unknown")).strip() or "Unknown"
+    jersey  = str(data.get("jersey_number") or "").strip() or None
+    team    = str(data.get("team_name", "Unknown")).strip() or "Unknown"
+    event   = data.get("event_type", "Other")
+    if event not in EVENT_TYPES:
+        event = "Other"
+    try:
+        conf = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        conf = 0.5
+
+    # Roster lookup runs in background so we return immediately.
+    # If it resolves the jersey → name, a subsequent frame will pick it up via prev_player context.
+    nba_on = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
+    if nba_on and jersey and team.lower() != "unknown":
+        work = {
+            "player_name": player,
+            "team_name":   team,
+            "jersey_number_primary":    jersey,
+            "team_name_from_visuals":   team,
+            "team_name_from_scoreboard": (data.get("scoreboard") or {}).get("home_team"),
+            "confidence":   conf,
+            "visual_summary": "",
+        }
+        # Fire-and-forget — don't await; caller gets the raw vision result right away
+        import asyncio as _asyncio
+        _asyncio.ensure_future(
+            _asyncio.to_thread(enrich_vision_with_nba_rosters, work)
+        )
+
+    raw_sb = data.get("scoreboard") or {}
+    scoreboard = {
+        "home_team":  raw_sb.get("home_team"),
+        "home_score": _safe_int(raw_sb.get("home_score")),
+        "away_team":  raw_sb.get("away_team"),
+        "away_score": _safe_int(raw_sb.get("away_score")),
+        "quarter":    raw_sb.get("quarter"),
+        "game_clock": raw_sb.get("game_clock"),
+        "shot_clock": _safe_int(raw_sb.get("shot_clock")),
+    }
+    has_sb = any(v is not None for v in scoreboard.values())
+
+    raw_ost = data.get("on_screen_text") or {}
+    on_screen = {
+        "game_title":          raw_ost.get("game_title"),
+        "broadcaster":         raw_ost.get("broadcaster"),
+        "player_stat_overlay": raw_ost.get("player_stat_overlay"),
+        "other":               [str(x) for x in (raw_ost.get("other") or []) if x],
+    }
+    has_ost = any(v for v in on_screen.values())
+
+    return {
+        "player_name":  player,
+        "jersey_number": jersey,
+        "team_name":    team,
+        "event_type":   event,
+        "confidence":   round(max(0.0, min(1.0, conf)), 3),
+        "commentary":   str(data.get("commentary", "")).strip(),
+        "scoreboard":   scoreboard if has_sb  else None,
+        "on_screen_text": on_screen if has_ost else None,
+        "timestamp":    body.timestamp,
+    }
+
+
+@app.post("/analyze-frame")
+async def analyze_frame(body: FrameRequest) -> dict[str, Any]:
+    """Real-time single-frame analysis: who has the ball right now?"""
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not set on backend")
+    try:
+        return await _quick_frame_analysis(body)
+    except Exception as e:
+        logger.exception("analyze-frame failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/player-stats")
+async def player_stats_endpoint(body: PlayerStatsRequest) -> dict[str, Any]:
+    """Look up stats for a named player from the knowledge base."""
+    ctx = retrieve_context(body.player_name, body.team_name)
+    return {
+        "player_stats": ctx.get("player_stats") or {},
+        "team_stats":   ctx.get("team_stats")   or {},
+    }
 
 
 @app.post("/export-commentary-video")
