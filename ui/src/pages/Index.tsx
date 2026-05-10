@@ -1,12 +1,12 @@
 import { useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { ArrowUpRight } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import UploadZone from "@/components/UploadZone";
 import ProcessingStatus, { type ProcessingStep } from "@/components/ProcessingStatus";
 import ResultsPanel from "@/components/ResultsPanel";
 import { runAnalysisPipeline, type AnalysisResult } from "@/lib/analysis";
 import { usePersistentState } from "@/hooks/usePersistentState";
+import { Rule } from "@/components/almanac";
 
 interface OfflineAnalysisState {
   step: ProcessingStep | null;
@@ -27,6 +27,18 @@ const Index = () => {
   );
   const [isRegenerating, setIsRegenerating] = useState(false);
   const { step, error, clipId, fileUrl, result } = analysisState;
+
+  const runPipelineForClip = useCallback(async (clipId: string, targetUrl: string) => {
+    setAnalysisState({ step: "processing", clipId, fileUrl: targetUrl });
+    setAnalysisState({ step: "detecting", clipId, fileUrl: targetUrl });
+    await delay(800);
+    setAnalysisState({ step: "retrieving", clipId, fileUrl: targetUrl });
+    await delay(600);
+    setAnalysisState({ step: "generating", clipId, fileUrl: targetUrl });
+
+    const payload = await runAnalysisPipeline(clipId, targetUrl);
+    setAnalysisState({ step: "complete", clipId, fileUrl: targetUrl, result: payload });
+  }, [setAnalysisState]);
 
   const processVideo = useCallback(async (file: File) => {
     setAnalysisState({ step: "uploading" });
@@ -51,16 +63,7 @@ const Index = () => {
         .single();
       if (clipError || !clip) throw new Error("Failed to save clip record");
 
-      setAnalysisState({ step: "processing", clipId: clip.id, fileUrl: publicUrl });
-
-      setAnalysisState({ step: "detecting", clipId: clip.id, fileUrl: publicUrl });
-      await delay(800);
-      setAnalysisState({ step: "retrieving", clipId: clip.id, fileUrl: publicUrl });
-      await delay(600);
-      setAnalysisState({ step: "generating", clipId: clip.id, fileUrl: publicUrl });
-
-      const payload = await runAnalysisPipeline(clip.id, publicUrl);
-      setAnalysisState({ step: "complete", clipId: clip.id, fileUrl: publicUrl, result: payload });
+      await runPipelineForClip(clip.id, publicUrl);
     } catch (err: unknown) {
       setAnalysisState((current) => ({
         ...current,
@@ -68,7 +71,33 @@ const Index = () => {
         step: "error",
       }));
     }
-  }, [setAnalysisState]);
+  }, [runPipelineForClip, setAnalysisState]);
+
+  const processVideoUrl = useCallback(async (url: string) => {
+    setAnalysisState({ step: "uploading" });
+
+    try {
+      const normalizedUrl = url.trim();
+      const parsedUrl = new URL(normalizedUrl);
+      const clipTitle = `URL clip - ${parsedUrl.hostname}`;
+
+      setAnalysisState({ step: "processing" });
+      const { data: clip, error: clipError } = await supabase
+        .from("clips")
+        .insert({ title: clipTitle, file_url: normalizedUrl })
+        .select()
+        .single();
+      if (clipError || !clip) throw new Error("Failed to save clip record");
+
+      await runPipelineForClip(clip.id, normalizedUrl);
+    } catch (err: unknown) {
+      setAnalysisState((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : "Something went wrong",
+        step: "error",
+      }));
+    }
+  }, [runPipelineForClip, setAnalysisState]);
 
   const handleRegenerate = useCallback(async () => {
     if (!clipId || !fileUrl) return;
@@ -90,28 +119,36 @@ const Index = () => {
   const isProcessing = !!step && step !== "complete" && step !== "error";
 
   return (
-    <div className="local-minima-bg flex h-screen flex-col overflow-hidden text-foreground">
-      <main className="mx-auto h-full w-full max-w-[1400px] overflow-hidden px-6 pb-8 pt-24 sm:px-10 sm:pt-28">
+    <div className="local-minima-bg flex min-h-screen flex-col text-foreground">
+      <main className="relative mx-auto w-full max-w-[1400px] px-6 pb-12 pt-40 sm:px-10 sm:pt-48">
+        <div className="absolute right-6 top-8 sm:right-10 sm:top-10">
+          <Link
+            to="/about"
+            className="inline-flex items-center gap-2 border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background"
+          >
+            ABOUT
+          </Link>
+        </div>
+
         {/* Hero */}
         <section className="grid justify-items-center gap-5 text-center">
           <div>
-            <h1 className="title-gradient font-display text-[clamp(72px,10vw,120px)] leading-[0.84]">
+            <h1 className="title-gradient font-display text-[clamp(56px,8.8vw,96px)] leading-[0.9]">
               VISION2VOICE
             </h1>
+            <p className="mt-4 max-w-[760px] font-body text-sm italic text-foreground/80 sm:text-base">
+              A quiet desk for live and replay moments, where every possession can unfold into a clearer story.
+            </p>
           </div>
-          <Link
-            to="/live"
-            className="group inline-flex items-center gap-3 border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background"
-          >
-            <span className="h-2 w-2 animate-live-blink bg-court" aria-hidden />
-            <span>LIVE REPLAY DESK</span>
-            <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
-          </Link>
         </section>
 
         {/* Upload */}
         <section className="mt-14 sm:mt-16">
-          <UploadZone onFileSelect={processVideo} isProcessing={isProcessing || !!result} />
+          <UploadZone
+            onFileSelect={processVideo}
+            onUrlSubmit={processVideoUrl}
+            isProcessing={isProcessing || !!result}
+          />
         </section>
 
         {/* Processing */}
@@ -147,6 +184,7 @@ const Index = () => {
           </div>
         )}
       </main>
+
     </div>
   );
 };
