@@ -986,7 +986,7 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/jpeg;base64,{img_b64}",
-                    "detail": "high",  # high detail needed for jersey numbers
+                    "detail": os.getenv("LIVE_FRAME_IMAGE_DETAIL", "low"),
                 }},
             ]}],
             response_format={"type": "json_object"},
@@ -1008,8 +1008,8 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
     except (TypeError, ValueError):
         conf = 0.5
 
-    # Roster lookup runs in background so we return immediately.
-    # If it resolves the jersey → name, a subsequent frame will pick it up via prev_player context.
+    # Run roster lookup synchronously so the response already has the correct name.
+    # Roster is cached per team for 45 min so only the first call per team is slow.
     nba_on = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
     if nba_on and jersey and team.lower() != "unknown":
         work = {
@@ -1021,11 +1021,11 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
             "confidence":   conf,
             "visual_summary": "",
         }
-        # Fire-and-forget — don't await; caller gets the raw vision result right away
         import asyncio as _asyncio
-        _asyncio.ensure_future(
-            _asyncio.to_thread(enrich_vision_with_nba_rosters, work)
-        )
+        await _asyncio.to_thread(enrich_vision_with_nba_rosters, work)
+        player = work["player_name"]
+        team   = work["team_name"]
+        conf   = work.get("confidence", conf)
 
     raw_sb = data.get("scoreboard") or {}
     scoreboard = {

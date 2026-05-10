@@ -3,14 +3,16 @@ import {
   Clock, Copy, Loader2, RefreshCw, RotateCcw, Shield, Target, Tv2,
   Volume2, VolumeX, Zap,
 } from "lucide-react";
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import {
+  analyzeFrame,
   exportCommentaryVideo,
   getBackendBaseUrl,
   runAnalysisPipeline,
   type AnalysisResult,
+  type FrameResult,
   type OnScreenText,
   type PlayerContext,
   type PossessionSegment,
@@ -273,6 +275,12 @@ export default function ResultsPanel({
   const [voiOn,        setVoiOn]        = useState(false);
   const [isRegen,      setIsRegen]      = useState(false);
 
+  // Real-time frame analysis
+  const canvasRef      = useRef<HTMLCanvasElement>(null);
+  const liveFrameRef   = useRef<FrameResult | null>(null);
+  const analyzingRef   = useRef(false);
+  const [liveFrame, setLiveFrame] = useState<FrameResult | null>(null);
+
   const backendUrl = getBackendBaseUrl();
   const timeline   = result?.possession_timeline   ?? [];
   const segLines   = result?.segment_commentary_lines ?? [];
@@ -288,6 +296,13 @@ export default function ResultsPanel({
   const displayLine   = (ai >= 0 && segLines[ai]) ? segLines[ai] : null;
   const evtCfg  = getE(displayEvent);
   const EIcon   = evtCfg.icon;
+
+  // Live frame wins when playing; pre-computed segment is the fallback when paused/scrubbing
+  const bh = (liveFrame && backendUrl)
+    ? { player: liveFrame.player_name, jersey: liveFrame.jersey_number, team: liveFrame.team_name, event: liveFrame.event_type, conf: liveFrame.confidence, isLive: true }
+    : activeSeg
+    ? { player: displayPlayer, jersey: displayJersey, team: displayTeam, event: displayEvent, conf: result?.confidence ?? null, isLive: false }
+    : null;
 
   const scoreboard   = result?.scoreboard    ?? null;
   const onScreenText = result?.on_screen_text ?? null;
@@ -321,6 +336,42 @@ export default function ResultsPanel({
   }, [voiOn, voiUrl]);
 
   useEffect(() => () => { if (voiUrl) URL.revokeObjectURL(voiUrl); }, [voiUrl]);
+
+  // ── Live frame analysis ────────────────────────────────────────────────────
+  const captureAndAnalyze = useCallback(async () => {
+    const vid    = vidRef.current;
+    const canvas = canvasRef.current;
+    if (!vid || !canvas || analyzingRef.current || !backendUrl || vid.paused || vid.ended) return;
+    analyzingRef.current = true;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) { analyzingRef.current = false; return; }
+    canvas.width  = 640;
+    canvas.height = 360;
+    try { ctx.drawImage(vid, 0, 0, 640, 360); }
+    catch { analyzingRef.current = false; return; }
+    const frameData = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+    const prev = liveFrameRef.current;
+    try {
+      const r = await analyzeFrame({
+        frame_data:  frameData,
+        timestamp:   vid.currentTime,
+        duration:    vid.duration,
+        prev_player: prev?.player_name   ?? null,
+        prev_jersey: prev?.jersey_number ?? null,
+        prev_team:   prev?.team_name     ?? null,
+      });
+      liveFrameRef.current = r;
+      setLiveFrame(r);
+    } catch { /* silently fail — don't interrupt playback */ }
+    finally { analyzingRef.current = false; }
+  }, [backendUrl]);
+
+  // Poll every 2 s while playing (matches ~200k token budget for a 6-min video)
+  useEffect(() => {
+    if (!isPlaying || !backendUrl) return;
+    const id = setInterval(captureAndAnalyze, 2000);
+    return () => clearInterval(id);
+  }, [isPlaying, backendUrl, captureAndAnalyze]);
 
   const toggleVoiceover = async () => {
     if (voiBusy || !cloudUrl || !result) return;
@@ -364,6 +415,8 @@ export default function ResultsPanel({
       {/* Hidden voiceover */}
       <video ref={voiRef} src={voiUrl || undefined} preload={voiUrl ? "auto" : "none"}
         style={{ position: "fixed", width: 0, height: 0, opacity: 0, pointerEvents: "none" }} />
+      {/* Hidden canvas for live frame capture */}
+      <canvas ref={canvasRef} style={{ display: "none" }} />
 
       {/* ── Header ── */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-white/[0.05] flex-shrink-0">
@@ -390,7 +443,8 @@ export default function ResultsPanel({
             onLoadedMetadata={onTimeUpdate}
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
-            onEnded={() => setIsPlaying(false)} />
+            onEnded={() => { setIsPlaying(false); setLiveFrame(null); liveFrameRef.current = null; }}
+            onSeeked={e => { onTimeUpdate(e as SyntheticEvent<HTMLVideoElement>); setLiveFrame(null); liveFrameRef.current = null; }} />
         </div>
 
         {/* Live panel */}
@@ -410,15 +464,22 @@ export default function ResultsPanel({
 
           {/* Ball handler */}
           <div className="px-4 py-4 border-b border-white/[0.04]">
-            <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-white/20 mb-3">Ball Handler</p>
+            <div className="flex items-center gap-2 mb-3">
+              <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-white/20">Ball Handler</p>
+              {bh?.isLive && (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-red-400 uppercase tracking-wider">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />Live
+                </span>
+              )}
+            </div>
 
-            {result && activeSeg ? (
-              <div key={`${displayPlayer}-${ai}`} className="animate-fade-in-up space-y-3">
+            {result && bh ? (
+              <div key={`${bh.player}-${bh.isLive ? liveFrame?.timestamp : ai}`} className="animate-fade-in-up space-y-3">
                 {/* Jersey box + name */}
                 <div className="flex items-center gap-3">
-                  {displayJersey ? (
+                  {bh.jersey ? (
                     <div className="w-14 h-14 rounded-2xl bg-primary/15 border border-primary/25 flex items-center justify-center flex-shrink-0">
-                      <span className="font-display text-2xl font-black text-primary leading-none">#{displayJersey}</span>
+                      <span className="font-display text-2xl font-black text-primary leading-none">#{bh.jersey}</span>
                     </div>
                   ) : (
                     <div className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center flex-shrink-0">
@@ -426,19 +487,16 @@ export default function ResultsPanel({
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="font-display text-xl font-bold text-white leading-tight truncate">{displayPlayer || "—"}</p>
-                    <p className="text-sm text-white/40 truncate mt-0.5">{displayTeam}</p>
+                    <p className="font-display text-xl font-bold text-white leading-tight truncate">{bh.player || "—"}</p>
+                    <p className="text-sm text-white/40 truncate mt-0.5">{bh.team}</p>
                   </div>
                 </div>
-                {/* Event — only rendered when segment is active */}
-                {displayEvent && <EventPill event={displayEvent} />}
-                {result.confidence != null && <ConfBar v={result.confidence} />}
+                {bh.event && <EventPill event={bh.event} />}
+                {bh.conf != null && <ConfBar v={bh.conf} />}
               </div>
             ) : result ? (
               <p className="text-xs text-white/20 italic">
-                {timeline.length > 0
-                  ? "Scrub or play the video to track possession"
-                  : "Play the video to see live tracking"}
+                {backendUrl ? "Play the video to see live tracking" : "Backend required for live tracking"}
               </p>
             ) : (
               <div className="space-y-3">
