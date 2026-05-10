@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
+from live_game_data import LiveGameSearchResult
 
 
 class LiveApiTests(unittest.TestCase):
@@ -70,6 +71,32 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(config.clock_mode, "feed_live")
         self.assertEqual(config.youtube_video_id, "dQw4w9WgXcQ")
         self.assertTrue(config.demo_feed_events)
+        self.assertFalse(config.include_knowledge)
+
+    def test_live_session_accepts_include_knowledge(self):
+        client = TestClient(main.app)
+        fake_session = SimpleNamespace(
+            session_id="session-knowledge",
+            status="ready",
+            config=SimpleNamespace(source_type="replay_file"),
+            kb=SimpleNamespace(team_names=["WAS", "CHA"], warnings=[]),
+            events=[],
+        )
+        with patch.object(main.live_sessions, "create_session", AsyncMock(return_value=fake_session)) as create:
+            response = client.post(
+                "/live/sessions",
+                json={
+                    "source_type": "replay_file",
+                    "file_url": "https://example.test/replay.mp4",
+                    "nba_game_id": "0022300157",
+                    "start_period": 1,
+                    "start_clock": "12:00",
+                    "include_knowledge": True,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        config = create.await_args.args[0]
+        self.assertTrue(config.include_knowledge)
 
     def test_youtube_live_session_rejects_missing_youtube_source(self):
         client = TestClient(main.app)
@@ -83,6 +110,56 @@ class LiveApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_live_game_detection_endpoint_is_removed(self):
+        client = TestClient(main.app)
+        response = client.post("/live/games/detect", json={})
+        self.assertEqual(response.status_code, 404)
+
+    def test_live_game_search_uses_short_timeout_and_cache(self):
+        client = TestClient(main.app)
+        main._live_game_search_cache.clear()
+        result = LiveGameSearchResult(
+            game_id="0022300157",
+            game_date="2023-11-08",
+            season="2023-24",
+            season_type="Regular Season",
+            matchup="WAS @ CHA",
+            team_abbreviation="WAS",
+            opponent_abbreviation="CHA",
+            home_team="CHA",
+            away_team="WAS",
+            team_score=132,
+            opponent_score=116,
+            score="132-116",
+            result="W",
+        )
+        with patch.object(main, "search_nba_games", return_value=[result]) as search:
+            response = client.get(
+                "/live/games/search",
+                params={
+                    "team": "WAS",
+                    "opponent": "CHA",
+                    "season": "2023-24",
+                    "season_type": "Regular Season",
+                },
+            )
+            cached_response = client.get(
+                "/live/games/search",
+                params={
+                    "team": "was",
+                    "opponent": "cha",
+                    "season": "2023-24",
+                    "season_type": "Regular Season",
+                },
+            )
+        main._live_game_search_cache.clear()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cached_response.status_code, 200)
+        self.assertEqual(response.json()[0]["game_id"], "0022300157")
+        search.assert_called_once()
+        self.assertEqual(search.call_args.kwargs["timeout"], 6)
 
     def test_live_persist_failure_logs_response_body(self):
         response = main.httpx.Response(400, text='{"message":"missing column source_type"}')

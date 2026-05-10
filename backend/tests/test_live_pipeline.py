@@ -2,11 +2,13 @@ import asyncio
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from live_game_data import (
     LiveGameEvent,
     LiveGamePackage,
+    NBAApiGameDataProvider,
     LivePlayer,
     LiveTeam,
     StaticGameDataProvider,
@@ -16,7 +18,7 @@ from live_game_data import (
     search_nba_games,
 )
 from live_kb import build_pregame_kb
-from live_sessions import LiveSessionConfig, LiveSessionManager
+from live_sessions import LiveSessionConfig, LiveSessionManager, _download_video_temp
 from live_state import (
     FeedContext,
     LiveStateReconciler,
@@ -63,6 +65,17 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
         facts = kb.facts_for("Jaylen Brown", "Boston Celtics", limit=3)
         self.assertTrue(any("jersey #7" in fact for fact in facts))
 
+    def test_pregame_kb_can_skip_extra_player_team_facts(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Boston Celtics", abbreviation="BOS")],
+            players=[LivePlayer(player_id="7", name="Jaylen Brown", team_name="Boston Celtics", jersey="7")],
+        )
+        kb = build_pregame_kb(package, include_knowledge=False)
+
+        self.assertEqual(kb.team_names, ["Boston Celtics"])
+        self.assertEqual(kb.facts_for("Jaylen Brown", "Boston Celtics", limit=3), [])
+
     def test_team_resolver_accepts_name_and_abbreviation(self):
         self.assertEqual(resolve_nba_team("WAS").abbreviation, "WAS")
         self.assertEqual(resolve_nba_team("Washington Wizards").abbreviation, "WAS")
@@ -104,6 +117,72 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].home_team, "CHA")
         self.assertEqual(results[0].away_team, "WAS")
         self.assertEqual(results[0].score, "132-116")
+
+    def test_nba_provider_skips_roster_load_when_knowledge_disabled(self):
+        import pandas as pd
+
+        class PlayByPlay:
+            kwargs = {}
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def get_data_frames(self):
+                return [
+                    pd.DataFrame(
+                        [
+                            {
+                                "description": "Test Player makes 2PT layup",
+                                "period": 1,
+                                "clock": "PT11M59.00S",
+                                "teamId": 1610612764,
+                                "teamTricode": "WAS",
+                                "personId": 1,
+                                "playerName": "Test Player",
+                                "actionType": "made",
+                                "subType": "layup",
+                                "actionNumber": 1,
+                                "scoreHome": "0",
+                                "scoreAway": "2",
+                            }
+                        ]
+                    )
+                ]
+
+        provider = NBAApiGameDataProvider()
+        with patch("nba_api.stats.endpoints.playbyplayv3.PlayByPlayV3", PlayByPlay), patch(
+            "nba_api.stats.static.teams.get_teams",
+            return_value=[
+                {
+                    "id": 1610612764,
+                    "full_name": "Washington Wizards",
+                    "abbreviation": "WAS",
+                    "city": "Washington",
+                }
+            ],
+        ), patch.object(provider, "_load_rosters", side_effect=AssertionError("rosters should be skipped")):
+            package = provider.load_game("0022300157", include_knowledge=False)
+
+        self.assertEqual(len(package.events), 1)
+        self.assertEqual(package.teams[0].name, "Washington Wizards")
+        self.assertEqual(PlayByPlay.kwargs["timeout"], 6)
+
+    async def test_download_video_temp_resolves_local_upload_without_http(self):
+        upload_id = "a" * 32
+        upload_dir = Path(tempfile.gettempdir()) / "vision2voice-live-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_path = upload_dir / f"{upload_id}.mp4"
+        upload_path.write_bytes(b"fake video")
+        self.addCleanup(lambda: upload_path.exists() and upload_path.unlink())
+
+        with patch("live_sessions.httpx.AsyncClient", side_effect=AssertionError("HTTP should not be used")):
+            resolved = await _download_video_temp(f"http://127.0.0.1:8000/live/uploads/{upload_id}")
+
+        self.assertEqual(resolved, str(upload_path))
+
+    async def test_download_video_temp_missing_local_upload_errors(self):
+        with self.assertRaisesRegex(RuntimeError, "Replay upload not found"):
+            await _download_video_temp(f"http://127.0.0.1:8000/live/uploads/{'b' * 32}")
 
     async def test_reconciler_suppresses_duplicate_feed_events(self):
         kb = build_pregame_kb(LiveGamePackage(game_id="fixture"))
@@ -454,6 +533,117 @@ class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         download.assert_not_awaited()
         duration.assert_not_called()
         manager._visual_observation.assert_not_awaited()
+
+    async def test_feed_live_first_caption_does_not_wait_for_enrichment(self):
+        event = LiveGameEvent(
+            event_id="evt-slow",
+            period=1,
+            clock="11:59",
+            game_elapsed_sec=game_elapsed_sec(1, "11:59"),
+            event_type="made_shot",
+            description="Test Player makes 2PT layup",
+            player_name="Test Player",
+            team_name="Test Team",
+            score="2-0",
+        )
+
+        class SequenceProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def load_game(self, game_id: str) -> LiveGamePackage:
+                self.calls += 1
+                return LiveGamePackage(game_id="fixture", events=[] if self.calls == 1 else [event])
+
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        async def slow_generate(*args, **kwargs):
+            await asyncio.sleep(0.25)
+            return "Slow enriched caption.", "mock-model"
+
+        manager = LiveSessionManager(provider=SequenceProvider(), event_sink=sink)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch(
+            "live_state.generate_caption_text",
+            AsyncMock(side_effect=slow_generate),
+        ):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    clock_mode="feed_live",
+                    source_type="youtube_embed",
+                    youtube_video_id="dQw4w9WgXcQ",
+                )
+            )
+            await asyncio.sleep(0.08)
+            captions = [event for event in emitted if event.get("type") == "caption"]
+            self.assertEqual(len(captions), 1)
+            self.assertEqual(captions[0]["event_id"], "evt-slow")
+            self.assertEqual(captions[0]["caption_stage"], "initial")
+            self.assertEqual(captions[0]["model_name"], "template-live")
+            await manager.stop_session(session.session_id)
+            await asyncio.sleep(0.02)
+
+    async def test_feed_live_enrichment_emits_caption_update(self):
+        event = LiveGameEvent(
+            event_id="evt-update",
+            period=1,
+            clock="11:59",
+            game_elapsed_sec=game_elapsed_sec(1, "11:59"),
+            event_type="made_shot",
+            description="Test Player makes 2PT layup",
+            player_name="Test Player",
+            team_name="Test Team",
+            score="2-0",
+        )
+
+        class SequenceProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def load_game(self, game_id: str) -> LiveGamePackage:
+                self.calls += 1
+                return LiveGamePackage(game_id="fixture", events=[] if self.calls == 1 else [event])
+
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=SequenceProvider(), event_sink=sink)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), patch(
+            "live_state.generate_caption_text",
+            AsyncMock(return_value=("Enriched caption with better rhythm.", "mock-model")),
+        ):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    clock_mode="feed_live",
+                    source_type="youtube_embed",
+                    youtube_video_id="dQw4w9WgXcQ",
+                )
+            )
+            for _ in range(20):
+                if any(event.get("type") == "caption_update" for event in emitted):
+                    break
+                await asyncio.sleep(0.02)
+            await manager.stop_session(session.session_id)
+            await asyncio.sleep(0.02)
+
+        updates = [event for event in emitted if event.get("type") == "caption_update"]
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["event_id"], "evt-update")
+        self.assertEqual(updates[0]["enriched_from_event_id"], "evt-update")
+        self.assertEqual(updates[0]["caption_stage"], "enriched")
+        self.assertEqual(updates[0]["text"], "Enriched caption with better rhythm.")
 
     async def test_feed_live_demo_event_emits_visible_caption_when_enabled(self):
         package = LiveGamePackage(

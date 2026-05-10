@@ -93,14 +93,15 @@ class LiveSessionRequest(BaseModel):
     nba_game_id: str
     start_period: int = Field(default=1, ge=1, le=10)
     start_clock: str = "12:00"
-    cadence_sec: float = Field(default=3.0, ge=1.0, le=10.0)
-    window_sec: float = Field(default=6.0, ge=2.0, le=20.0)
+    cadence_sec: float = Field(default=1.0, ge=1.0, le=10.0)
+    window_sec: float = Field(default=2.0, ge=2.0, le=20.0)
     replay_speed: float = Field(default=1.0, ge=0.25, le=8.0)
     clock_mode: str = "replay_media"
     source_type: str = Field(default="replay_file", pattern="^(replay_file|youtube_embed)$")
     youtube_url: str | None = None
     youtube_video_id: str | None = None
     demo_feed_events: bool = False
+    include_knowledge: bool = False
 
     @model_validator(mode="after")
     def validate_source(self) -> "LiveSessionRequest":
@@ -661,6 +662,7 @@ def log_live_persist_failure(response: httpx.Response, event_type: Any) -> None:
 
 
 live_sessions = LiveSessionManager(event_sink=persist_live_event_to_supabase)
+_live_game_search_cache: dict[tuple[str, str, str, str, int], list[LiveGameSearchResultResponse]] = {}
 
 
 async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> AnalysisResult:
@@ -788,17 +790,38 @@ async def search_live_games(
 ) -> list[LiveGameSearchResultResponse]:
     try:
         capped_limit = max(1, min(limit, 50))
-        results = await asyncio.to_thread(
-            search_nba_games,
-            team=team,
-            opponent=opponent,
-            season=season,
-            season_type=season_type,
-            limit=capped_limit,
+        cache_key = (
+            team.strip().lower(),
+            opponent.strip().lower(),
+            season.strip(),
+            season_type.strip(),
+            capped_limit,
         )
-        return [LiveGameSearchResultResponse(**asdict(result)) for result in results]
+        if cache_key in _live_game_search_cache:
+            return _live_game_search_cache[cache_key]
+
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                search_nba_games,
+                team=team,
+                opponent=opponent,
+                season=season,
+                season_type=season_type,
+                limit=capped_limit,
+                timeout=6,
+            ),
+            timeout=8,
+        )
+        response = [LiveGameSearchResultResponse(**asdict(result)) for result in results]
+        _live_game_search_cache[cache_key] = response
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="NBA game search timed out. Enter the game ID manually or try again.",
+        ) from exc
     except Exception as exc:
         logger.exception("Live game search failed")
         raise HTTPException(status_code=502, detail=f"NBA game search failed: {exc}") from exc
@@ -821,6 +844,7 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
                 youtube_url=body.youtube_url,
                 youtube_video_id=body.youtube_video_id,
                 demo_feed_events=body.demo_feed_events,
+                include_knowledge=body.include_knowledge,
             )
         )
         return LiveSessionResponse(
@@ -831,6 +855,9 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
             event_count=len(session.events),
             warnings=session.kb.warnings,
         )
+    except TimeoutError as e:
+        logger.warning("Live session creation timed out: %s", e)
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except Exception as e:
         logger.exception("Live session creation failed")
         raise HTTPException(status_code=500, detail=str(e)) from e

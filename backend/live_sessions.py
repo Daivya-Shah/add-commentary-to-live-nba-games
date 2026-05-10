@@ -6,12 +6,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -34,14 +36,15 @@ class LiveSessionConfig:
     start_period: int
     start_clock: str
     file_url: str | None = None
-    cadence_sec: float = 3.0
-    window_sec: float = 6.0
+    cadence_sec: float = 1.0
+    window_sec: float = 2.0
     replay_speed: float = 1.0
     clock_mode: str = "replay_media"
     source_type: str = "replay_file"
     youtube_url: str | None = None
     youtube_video_id: str | None = None
     demo_feed_events: bool = False
+    include_knowledge: bool = False
 
 
 @dataclass
@@ -64,6 +67,8 @@ class LiveSession:
     current_clock: str = "12:00"
     current_score: str | None = None
     playback_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    playback_revision: int = 0
+    enrichment_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
 
 class LiveSessionManager:
@@ -75,10 +80,11 @@ class LiveSessionManager:
         self.provider = provider or NBAApiGameDataProvider()
         self.event_sink = event_sink
         self.sessions: dict[str, LiveSession] = {}
+        self._initial_package_cache: dict[tuple[str, bool], LiveGamePackage] = {}
 
     async def create_session(self, config: LiveSessionConfig) -> LiveSession:
-        package = await asyncio.to_thread(self.provider.load_game, config.nba_game_id)
-        kb = build_pregame_kb(package)
+        package = await self._load_initial_game_package(config)
+        kb = build_pregame_kb(package, include_knowledge=config.include_knowledge)
         session = LiveSession(
             session_id=str(uuid.uuid4()),
             config=config,
@@ -151,6 +157,7 @@ class LiveSessionManager:
         session.replay_elapsed = replay_elapsed
         session.playback_rate = rate
         session.status = "running" if state == "playing" else "paused"
+        session.playback_revision += 1
         if state == "playing":
             session.started_at = time.time() - (replay_elapsed / rate)
 
@@ -220,6 +227,8 @@ class LiveSessionManager:
             reconciler = LiveStateReconciler(session.kb)
             start_abs = game_elapsed_sec(config.start_period, config.start_clock)
             previous_signature: str | None = None
+            should_process_immediate = True
+            last_playback_revision = session.playback_revision
             await self._emit_tick(session)
 
             while session.replay_elapsed < duration and not session.stopped:
@@ -230,12 +239,29 @@ class LiveSessionManager:
                 if session.stopped:
                     break
 
-                sleep_for = config.cadence_sec / max(0.1, session.playback_rate)
-                await asyncio.sleep(sleep_for)
-                if session.stopped or session.status != "running":
-                    continue
+                if not should_process_immediate:
+                    sleep_for = config.cadence_sec / max(0.1, session.playback_rate)
+                    try:
+                        async with session.playback_condition:
+                            await asyncio.wait_for(
+                                session.playback_condition.wait_for(
+                                    lambda: session.stopped
+                                    or session.status != "running"
+                                    or session.playback_revision != last_playback_revision
+                                ),
+                                timeout=sleep_for,
+                            )
+                    except asyncio.TimeoutError:
+                        session.replay_elapsed = min(duration, session.replay_elapsed + config.cadence_sec)
+                    else:
+                        last_playback_revision = session.playback_revision
+                        if session.stopped or session.status != "running":
+                            continue
+                        should_process_immediate = True
+                else:
+                    last_playback_revision = session.playback_revision
+                should_process_immediate = False
 
-                session.replay_elapsed = min(duration, session.replay_elapsed + config.cadence_sec)
                 period, clock, game_abs = align_replay_time(
                     config.start_period,
                     config.start_clock,
@@ -255,25 +281,38 @@ class LiveSessionManager:
                     clock=clock,
                     team_names=session.kb.team_names,
                 )
-                visual = await self._visual_observation(
-                    video_path,
-                    max(0.0, session.replay_elapsed - config.window_sec),
-                    session.replay_elapsed,
-                    previous_signature=previous_signature,
-                    force=bool(feed_events),
-                )
-                previous_signature = visual.summary if visual else previous_signature
 
                 if feed_events:
                     for event in feed_events:
-                        decision = await reconciler.caption_for_feed_event(
+                        decision = reconciler.fast_caption_for_feed_event(
                             event,
                             replay_time_sec=session.replay_elapsed,
-                            visual=visual,
+                            visual=None,
                         )
                         decision.latency_ms = _latency_ms(session.started_at, decision.replay_time_sec, session.playback_rate)
                         await self._emit_caption(session, decision)
+                        self._schedule_caption_enrichment(
+                            session,
+                            reconciler,
+                            event,
+                            replay_time_sec=session.replay_elapsed,
+                            initial_text=decision.text,
+                            visual_args=(
+                                video_path,
+                                max(0.0, session.replay_elapsed - config.window_sec),
+                                session.replay_elapsed,
+                                previous_signature,
+                            ),
+                        )
                 else:
+                    visual = await self._visual_observation(
+                        video_path,
+                        max(0.0, session.replay_elapsed - config.window_sec),
+                        session.replay_elapsed,
+                        previous_signature=previous_signature,
+                        force=False,
+                    )
+                    previous_signature = visual.summary if visual else previous_signature
                     decision = await reconciler.caption_for_feed_context(
                         period=period,
                         clock=clock,
@@ -306,6 +345,7 @@ class LiveSessionManager:
                 {"type": "error", "session_id": session.session_id, "error": str(exc)},
             )
         finally:
+            await self._cancel_enrichment_tasks(session)
             if video_path:
                 try:
                     Path(video_path).unlink()
@@ -353,18 +393,25 @@ class LiveSessionManager:
                     session.current_clock = demo_event.clock
                     session.current_score = demo_event.score
                     session.replay_elapsed = demo_event.game_elapsed_sec
-                    decision = await reconciler.caption_for_feed_event(
+                    decision = reconciler.fast_caption_for_feed_event(
                         demo_event,
                         replay_time_sec=demo_event.game_elapsed_sec,
                         visual=None,
                     )
                     await self._emit_caption(session, decision)
+                    self._schedule_caption_enrichment(
+                        session,
+                        reconciler,
+                        demo_event,
+                        replay_time_sec=demo_event.game_elapsed_sec,
+                        initial_text=decision.text,
+                    )
                     await self._emit_tick(session)
                     demo_emitted = True
                     continue
 
                 try:
-                    package = await asyncio.to_thread(self.provider.load_game, config.nba_game_id)
+                    package = await self._load_game_package(config)
                 except Exception as exc:
                     warning = f"NBA play-by-play poll failed: {exc}"
                     logger.warning(warning)
@@ -383,7 +430,7 @@ class LiveSessionManager:
                     continue
 
                 if package.teams or package.players or package.warnings:
-                    session.kb = build_pregame_kb(package)
+                    session.kb = build_pregame_kb(package, include_knowledge=config.include_knowledge)
                 session.events = package.events
                 if session.events:
                     latest = session.events[-1]
@@ -394,12 +441,19 @@ class LiveSessionManager:
 
                 feed_events = reconciler.unseen_feed_events(session.events)
                 for event in feed_events:
-                    decision = await reconciler.caption_for_feed_event(
+                    decision = reconciler.fast_caption_for_feed_event(
                         event,
                         replay_time_sec=event.game_elapsed_sec,
                         visual=None,
                     )
                     await self._emit_caption(session, decision)
+                    self._schedule_caption_enrichment(
+                        session,
+                        reconciler,
+                        event,
+                        replay_time_sec=event.game_elapsed_sec,
+                        initial_text=decision.text,
+                    )
                 await self._emit_tick(session)
 
             session.ended_at = time.time()
@@ -420,6 +474,115 @@ class LiveSessionManager:
                 session,
                 {"type": "error", "session_id": session.session_id, "error": str(exc)},
             )
+        finally:
+            await self._cancel_enrichment_tasks(session)
+
+    async def _load_game_package(self, config: LiveSessionConfig):
+        try:
+            return await asyncio.to_thread(
+                self.provider.load_game,
+                config.nba_game_id,
+                include_knowledge=config.include_knowledge,
+            )
+        except TypeError as exc:
+            if "include_knowledge" not in str(exc):
+                raise
+            return await asyncio.to_thread(self.provider.load_game, config.nba_game_id)
+
+    async def _load_initial_game_package(self, config: LiveSessionConfig):
+        cache_key = (config.nba_game_id, config.include_knowledge)
+        if config.source_type == "replay_file" and cache_key in self._initial_package_cache:
+            return self._initial_package_cache[cache_key]
+        try:
+            package = await asyncio.wait_for(
+                self._load_game_package(config),
+                timeout=_env_float("LIVE_GAME_LOAD_TIMEOUT_SEC", 14.0),
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                "NBA play-by-play loading timed out. Try again or use the manual game ID after confirming it."
+            ) from exc
+        if config.source_type == "replay_file":
+            self._initial_package_cache[cache_key] = package
+        return package
+
+    def _schedule_caption_enrichment(
+        self,
+        session: LiveSession,
+        reconciler: LiveStateReconciler,
+        event: LiveGameEvent,
+        *,
+        replay_time_sec: float,
+        initial_text: str,
+        visual_args: tuple[str, float, float, str | None] | None = None,
+    ) -> None:
+        if not os.getenv("OPENAI_API_KEY") and visual_args is None:
+            return
+        task = asyncio.create_task(
+            self._enrich_feed_caption(
+                session,
+                reconciler,
+                event,
+                replay_time_sec=replay_time_sec,
+                initial_text=initial_text,
+                visual_args=visual_args,
+            )
+        )
+        session.enrichment_tasks.add(task)
+        task.add_done_callback(session.enrichment_tasks.discard)
+
+    async def _enrich_feed_caption(
+        self,
+        session: LiveSession,
+        reconciler: LiveStateReconciler,
+        event: LiveGameEvent,
+        *,
+        replay_time_sec: float,
+        initial_text: str,
+        visual_args: tuple[str, float, float, str | None] | None,
+    ) -> None:
+        visual: VisualObservation | None = None
+        try:
+            if visual_args is not None:
+                video_path, t0, t1, previous_signature = visual_args
+                visual = await asyncio.wait_for(
+                    self._visual_observation(
+                        video_path,
+                        t0,
+                        t1,
+                        previous_signature=previous_signature,
+                        force=True,
+                    ),
+                    timeout=_env_float("LIVE_VISION_TIMEOUT_SEC", 1.5),
+                )
+            if not os.getenv("OPENAI_API_KEY") and visual is None:
+                return
+            decision = await asyncio.wait_for(
+                reconciler.enriched_caption_for_feed_event(
+                    event,
+                    replay_time_sec=replay_time_sec,
+                    visual=visual,
+                    recent_captions=list(reconciler.recent_captions),
+                ),
+                timeout=_env_float("LIVE_CAPTION_ENRICH_TIMEOUT_SEC", 2.0),
+            )
+            if decision.text.strip() == initial_text.strip() and not decision.visual_summary:
+                return
+            decision.latency_ms = _latency_ms(session.started_at, decision.replay_time_sec, session.playback_rate)
+            await self._emit_caption(session, decision, event_type="caption_update")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Live caption enrichment skipped: %s", exc)
+
+    async def _cancel_enrichment_tasks(self, session: LiveSession) -> None:
+        if not session.enrichment_tasks:
+            return
+        tasks = list(session.enrichment_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        session.enrichment_tasks.clear()
 
     async def _visual_observation(
         self,
@@ -456,11 +619,17 @@ class LiveSessionManager:
                 action_level="medium" if changed else "low",
             )
 
-    async def _emit_caption(self, session: LiveSession, decision: CaptionDecision) -> None:
+    async def _emit_caption(
+        self,
+        session: LiveSession,
+        decision: CaptionDecision,
+        *,
+        event_type: str = "caption",
+    ) -> None:
         await self._broadcast(
             session,
             {
-                "type": "caption",
+                "type": event_type,
                 "session_id": session.session_id,
                 **asdict(decision),
             },
@@ -506,13 +675,33 @@ class LiveSessionManager:
 
 
 async def _download_video_temp(file_url: str) -> str:
-    async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as client:
-        r = await client.get(file_url)
-        r.raise_for_status()
+    local_upload = _local_live_upload_path(file_url)
+    if local_upload:
+        return str(local_upload)
+    try:
+        async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+            r = await client.get(file_url)
+            r.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("Replay video download timed out. Try a smaller clip or use local upload.") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Replay video download failed: {exc}") from exc
     fd, path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
     Path(path).write_bytes(r.content)
     return path
+
+
+def _local_live_upload_path(file_url: str) -> Path | None:
+    parsed = urlparse(file_url)
+    match = re.fullmatch(r"/live/uploads/([a-f0-9]{32})", parsed.path)
+    if not match:
+        return None
+    upload_dir = Path(tempfile.gettempdir()) / "vision2voice-live-uploads"
+    matches = list(upload_dir.glob(f"{match.group(1)}.*"))
+    if not matches:
+        raise RuntimeError("Replay upload not found. Upload the file again and restart the session.")
+    return matches[0]
 
 
 def _video_duration_sec(video_path: str) -> float:
@@ -618,6 +807,13 @@ def _latency_ms(started_at: float | None, replay_time_sec: float, replay_speed: 
         return 0
     expected_wall = replay_time_sec / max(0.1, replay_speed)
     return max(0, int((time.time() - started_at - expected_wall) * 1000))
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def build_feed_context(

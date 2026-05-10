@@ -72,7 +72,7 @@ class LiveGameSearchResult:
 
 
 class GameDataProvider(Protocol):
-    def load_game(self, game_id: str) -> LiveGamePackage:
+    def load_game(self, game_id: str, *, include_knowledge: bool = False) -> LiveGamePackage:
         ...
 
 
@@ -265,6 +265,7 @@ def search_nba_games(
     season: str,
     season_type: str,
     limit: int = 20,
+    timeout: int = 30,
 ) -> list[LiveGameSearchResult]:
     team_info = resolve_nba_team(team)
     opponent_info = resolve_nba_team(opponent)
@@ -287,7 +288,7 @@ def search_nba_games(
         vs_team_id_nullable=opponent_info.team_id,
         season_nullable=season,
         season_type_nullable=season_type,
-        timeout=30,
+        timeout=timeout,
     )
     df = finder.get_data_frames()[0]
     results: list[LiveGameSearchResult] = []
@@ -342,16 +343,19 @@ def matchup_home_away(matchup: str, team_abbr: str, opponent_abbr: str) -> tuple
 class NBAApiGameDataProvider:
     """First provider implementation backed by nba_api / stats.nba.com."""
 
-    def load_game(self, game_id: str) -> LiveGamePackage:
-        v3_package = self._load_game_v3(game_id)
+    def __init__(self, *, timeout: int = 6):
+        self.timeout = timeout
+
+    def load_game(self, game_id: str, *, include_knowledge: bool = False) -> LiveGamePackage:
+        v3_package = self._load_game_v3(game_id, include_knowledge=include_knowledge)
         if v3_package.events:
             return v3_package
         if v3_package.warnings:
             logger.warning("Falling back to PlayByPlayV2 after V3 warning: %s", v3_package.warnings[-1])
 
-        return self._load_game_v2(game_id, seed_warnings=v3_package.warnings)
+        return self._load_game_v2(game_id, seed_warnings=v3_package.warnings, include_knowledge=include_knowledge)
 
-    def _load_game_v3(self, game_id: str) -> LiveGamePackage:
+    def _load_game_v3(self, game_id: str, *, include_knowledge: bool) -> LiveGamePackage:
         warnings: list[str] = []
         teams: dict[str, LiveTeam] = {}
         players: dict[str, LivePlayer] = {}
@@ -362,7 +366,7 @@ class NBAApiGameDataProvider:
             from nba_api.stats.static import teams as nba_teams
 
             team_by_id = {str(t["id"]): t for t in nba_teams.get_teams()}
-            pbp = playbyplayv3.PlayByPlayV3(game_id=game_id)
+            pbp = playbyplayv3.PlayByPlayV3(game_id=game_id, timeout=self.timeout)
             df = pbp.get_data_frames()[0]
         except Exception as exc:  # pragma: no cover - network/provider dependent
             msg = f"nba_api play-by-play v3 unavailable for game {game_id}: {exc}"
@@ -414,10 +418,11 @@ class NBAApiGameDataProvider:
                 )
             )
 
-        roster_players, roster_warnings = self._load_rosters(list(teams.values()))
-        warnings.extend(roster_warnings)
-        for p in roster_players:
-            players.setdefault(p.player_id, p)
+        if include_knowledge:
+            roster_players, roster_warnings = self._load_rosters(list(teams.values()))
+            warnings.extend(roster_warnings)
+            for p in roster_players:
+                players.setdefault(p.player_id, p)
 
         events.sort(key=lambda e: (e.game_elapsed_sec, e.event_id))
         return LiveGamePackage(
@@ -428,7 +433,13 @@ class NBAApiGameDataProvider:
             warnings=warnings,
         )
 
-    def _load_game_v2(self, game_id: str, seed_warnings: list[str] | None = None) -> LiveGamePackage:
+    def _load_game_v2(
+        self,
+        game_id: str,
+        seed_warnings: list[str] | None = None,
+        *,
+        include_knowledge: bool,
+    ) -> LiveGamePackage:
         warnings: list[str] = []
         if seed_warnings:
             warnings.extend(seed_warnings)
@@ -439,7 +450,7 @@ class NBAApiGameDataProvider:
         try:
             from nba_api.stats.endpoints import playbyplayv2
 
-            pbp = playbyplayv2.PlayByPlayV2(game_id=game_id)
+            pbp = playbyplayv2.PlayByPlayV2(game_id=game_id, timeout=self.timeout)
             df = pbp.get_data_frames()[0]
         except Exception as exc:  # pragma: no cover - network/provider dependent
             msg = f"nba_api play-by-play unavailable for game {game_id}: {exc}"
@@ -492,10 +503,11 @@ class NBAApiGameDataProvider:
                 )
             )
 
-        roster_players, roster_warnings = self._load_rosters(list(teams.values()))
-        warnings.extend(roster_warnings)
-        for p in roster_players:
-            players.setdefault(p.player_id, p)
+        if include_knowledge:
+            roster_players, roster_warnings = self._load_rosters(list(teams.values()))
+            warnings.extend(roster_warnings)
+            for p in roster_players:
+                players.setdefault(p.player_id, p)
 
         events.sort(key=lambda e: (e.game_elapsed_sec, e.event_id))
         return LiveGamePackage(
@@ -544,5 +556,5 @@ class StaticGameDataProvider:
     def __init__(self, package: LiveGamePackage):
         self.package = package
 
-    def load_game(self, game_id: str) -> LiveGamePackage:
+    def load_game(self, game_id: str, *, include_knowledge: bool = False) -> LiveGamePackage:
         return self.package

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -99,6 +100,13 @@ class CaptionDecision:
     visual_summary: str | None = None
     feed_context: dict[str, Any] | None = None
     latency_ms: int = 0
+    caption_stage: str = "initial"
+    generated_at: str = ""
+    enriched_from_event_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.generated_at:
+            self.generated_at = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -124,6 +132,9 @@ class LiveStateReconciler:
         replay_time_sec: float,
         visual: VisualObservation | None,
     ) -> CaptionDecision:
+        if not os.getenv("OPENAI_API_KEY"):
+            return self.fast_caption_for_feed_event(event, replay_time_sec=replay_time_sec, visual=visual)
+
         self.seen_event_ids.add(event.event_id)
         if event.team_name:
             self.last_possession_team = event.team_name
@@ -158,6 +169,88 @@ class LiveStateReconciler:
             feed_description=event.description,
             visual_summary=visual.summary if visual else None,
             feed_context=feed_context_to_payload(context),
+            caption_stage="enriched",
+            enriched_from_event_id=event.event_id,
+        )
+
+    def fast_caption_for_feed_event(
+        self,
+        event: LiveGameEvent,
+        *,
+        replay_time_sec: float,
+        visual: VisualObservation | None = None,
+    ) -> CaptionDecision:
+        self.seen_event_ids.add(event.event_id)
+        if event.team_name:
+            self.last_possession_team = event.team_name
+        self.last_event_type = event.event_type
+        text = template_caption(event, self.kb, visual)
+        self._remember(text)
+        context = FeedContext(
+            period=event.period,
+            clock=event.clock,
+            team_names=self.kb.team_names,
+            nearest_prior=event,
+            last_score=event.score,
+        )
+        return CaptionDecision(
+            event_id=event.event_id,
+            period=event.period,
+            clock=event.clock,
+            event_type=event.event_type,
+            player_name=event.player_name,
+            team_name=event.team_name,
+            score=event.score,
+            text=text,
+            source="feed_with_vision" if visual else "feed",
+            confidence=0.9 if visual else 0.86,
+            model_name="template-live",
+            replay_time_sec=replay_time_sec,
+            feed_description=event.description,
+            visual_summary=visual.summary if visual else None,
+            feed_context=feed_context_to_payload(context),
+            caption_stage="initial",
+        )
+
+    async def enriched_caption_for_feed_event(
+        self,
+        event: LiveGameEvent,
+        *,
+        replay_time_sec: float,
+        visual: VisualObservation | None,
+        recent_captions: list[str] | None = None,
+    ) -> CaptionDecision:
+        text, model = await generate_caption_text(
+            event=event,
+            kb=self.kb,
+            recent_captions=recent_captions if recent_captions is not None else self.recent_captions,
+            visual=visual,
+        )
+        context = FeedContext(
+            period=event.period,
+            clock=event.clock,
+            team_names=self.kb.team_names,
+            nearest_prior=event,
+            last_score=event.score,
+        )
+        return CaptionDecision(
+            event_id=event.event_id,
+            period=event.period,
+            clock=event.clock,
+            event_type=event.event_type,
+            player_name=event.player_name,
+            team_name=event.team_name,
+            score=event.score,
+            text=text,
+            source="feed_with_vision" if visual else "feed",
+            confidence=0.94 if visual else 0.9,
+            model_name=model,
+            replay_time_sec=replay_time_sec,
+            feed_description=event.description,
+            visual_summary=visual.summary if visual else None,
+            feed_context=feed_context_to_payload(context),
+            caption_stage="enriched",
+            enriched_from_event_id=event.event_id,
         )
 
     async def caption_for_feed_context(
