@@ -108,6 +108,27 @@ describe("live utilities", () => {
     ).resolves.toMatchObject([{ game_id: "0022300157" }]);
   });
 
+  it("uses sanitized live game search errors from the backend", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    global.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          detail: "NBA game search timed out. Enter the game ID manually or try again.",
+        }),
+        { status: 504, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as typeof fetch;
+
+    await expect(
+      searchLiveGames({
+        team: "WAS",
+        opponent: "CHA",
+        season: "2023-24",
+        season_type: "Regular Season",
+      }),
+    ).rejects.toThrow("NBA game search timed out. Enter the game ID manually or try again.");
+  });
+
   it("starts live sessions with a timeout signal", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
     global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

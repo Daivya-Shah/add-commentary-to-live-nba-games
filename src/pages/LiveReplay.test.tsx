@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -133,7 +133,10 @@ describe("LiveReplay", () => {
     fireEvent.change(screen.getByLabelText(/NBA game id/i), { target: { value: "0022300157" } });
     fireEvent.change(screen.getByLabelText(/Start clock/i), { target: { value: "11:42" } });
     fireEvent.click(screen.getByLabelText(/Include extra player\/team knowledge/i));
-    fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     await waitFor(() =>
       expect(sessionBody).toMatchObject({
@@ -254,6 +257,11 @@ describe("LiveReplay", () => {
 
   it("sends video play and pause state to the backend playback clock", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    const originalConsoleError = console.error;
+    vi.spyOn(console, "error").mockImplementation((...args) => {
+      if (String(args[0]).includes("not wrapped in act")) return;
+      originalConsoleError(...args);
+    });
     class FakeEventSource {
       onerror: (() => void) | null = null;
       addEventListener = vi.fn();
@@ -298,7 +306,10 @@ describe("LiveReplay", () => {
     fireEvent.click(screen.getByRole("button", { name: /paste url/i }));
     fireEvent.change(screen.getByLabelText(/Replay video URL/i), { target: { value: "https://example.test/replay.mp4" } });
     fireEvent.change(screen.getByLabelText(/NBA game id/i), { target: { value: "0022300157" } });
-    fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /start replay/i }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     await waitFor(() => expect(document.querySelector("video")).toBeTruthy());
     const video = document.querySelector("video") as HTMLVideoElement;
@@ -308,9 +319,14 @@ describe("LiveReplay", () => {
     });
     video.currentTime = 14;
     video.playbackRate = 1.5;
-    fireEvent.click(screen.getByRole("button", { name: /play/i }));
-    fireEvent.play(video);
-    fireEvent.pause(video);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /play/i }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      fireEvent.pause(video);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     await waitFor(() => {
       expect(playbackBodies).toEqual(
@@ -559,7 +575,7 @@ describe("LiveReplay", () => {
 
   it("merges caption_update events into the existing caption", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
-    let listeners: Record<string, (message: MessageEvent) => void> = {};
+    const listeners: Record<string, (message: MessageEvent) => void> = {};
     class FakeEventSource {
       onerror: (() => void) | null = null;
       addEventListener = vi.fn((type: string, listener: (message: MessageEvent) => void) => {
@@ -617,20 +633,24 @@ describe("LiveReplay", () => {
       latency_ms: 0,
       caption_stage: "initial",
     };
-    listeners.caption(new MessageEvent("caption", { data: JSON.stringify(initial) }));
+    await act(async () => {
+      listeners.caption(new MessageEvent("caption", { data: JSON.stringify(initial) }));
+    });
     expect(await screen.findByText(/Initial template caption/i)).toBeInTheDocument();
 
-    listeners.caption_update(
-      new MessageEvent("caption_update", {
-        data: JSON.stringify({
-          ...initial,
-          type: "caption_update",
-          text: "Enriched caption with better rhythm.",
-          caption_stage: "enriched",
-          enriched_from_event_id: "evt-1",
+    await act(async () => {
+      listeners.caption_update(
+        new MessageEvent("caption_update", {
+          data: JSON.stringify({
+            ...initial,
+            type: "caption_update",
+            text: "Enriched caption with better rhythm.",
+            caption_stage: "enriched",
+            enriched_from_event_id: "evt-1",
+          }),
         }),
-      }),
-    );
+      );
+    });
 
     expect(await screen.findByText(/Enriched caption with better rhythm/i)).toBeInTheDocument();
     expect(screen.queryByText(/Initial template caption/i)).not.toBeInTheDocument();
