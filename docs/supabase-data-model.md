@@ -120,10 +120,13 @@ Stores emitted live replay captions.
 | `team_name` | TEXT | Team when available. |
 | `score` | TEXT | Score string when available. |
 | `caption_text` | TEXT | Emitted caption. |
+| `caption_stage` | TEXT | `initial` for immediate feed/template captions, `enriched` for async updates. |
 | `source` | TEXT | `feed`, `feed_with_vision`, `feed_context_with_vision`, or related source label. |
 | `confidence` | NUMERIC | Caption confidence. |
 | `latency_ms` | INTEGER | Measured replay caption latency. |
 | `model_name` | TEXT | Model or template label. |
+| `generated_at` | TIMESTAMPTZ | Backend timestamp from the caption decision. |
+| `enriched_from_event_id` | TEXT | Original event ID for an enriched caption update. |
 | `feed_description` | TEXT | Official play-by-play description. |
 | `visual_summary` | TEXT | Optional visual observation. |
 | `feed_context_json` | JSONB | Nearby event context. |

@@ -44,6 +44,7 @@ The `/live` screen supports two live-caption modes and requires direct FastAPI m
 | `window_sec` | Visual observation window size. |
 | `replay_speed` | Playback speed for the backend replay loop. |
 | `clock_mode` | `replay_media` for client-controlled replay playback, or `feed_live` for NBA-feed-driven YouTube sessions. |
+| `include_knowledge` | Optional. Defaults to `false`; when `true`, the backend loads roster/player/team facts for richer AI captions. |
 
 ## Backend Session Lifecycle
 
@@ -56,8 +57,9 @@ The `/live` screen supports two live-caption modes and requires direct FastAPI m
 5. The session waits in `ready` until the browser video starts playing.
 6. The session loop maps replay seconds to game period/clock while status is `running`.
 7. The loop emits `tick` events for UI progress.
-8. The reconciler emits `caption` events when feed events or feed context justify one.
-9. The stream emits `complete`, `stopped`, or `error`.
+8. The reconciler emits immediate `caption` events when feed events or feed context justify one.
+9. Best-effort AI/vision enrichment can emit `caption_update` events for the same feed event without blocking the initial caption.
+10. The stream emits `complete`, `stopped`, or `error`.
 
 ### YouTube Feed-Live
 
@@ -65,10 +67,11 @@ The `/live` screen supports two live-caption modes and requires direct FastAPI m
 2. The manager loads initial NBA play-by-play and marks already-known events as seen.
 3. The browser renders the YouTube embed with `enablejsapi=1`.
 4. The backend polls NBA play-by-play every `cadence_sec`.
-5. Newly observed feed events produce `feed` captions.
-6. Ticks use the latest feed event period, clock, score, and event count.
-7. Poll failures emit warning/status events; the session does not invent captions while the feed is unavailable.
-8. The stream runs until stopped or an unrecoverable error occurs.
+5. Newly observed feed events produce immediate `feed` captions.
+6. Best-effort AI enrichment can emit `caption_update` events for the same feed event.
+7. Ticks use the latest feed event period, clock, score, and event count.
+8. Poll failures emit warning/status events; the session does not invent captions while the feed is unavailable.
+9. The stream runs until stopped or an unrecoverable error occurs.
 
 Completed games may show an empty feed-live caption panel because existing events are seeded as already seen. In local development, enable demo feed events to verify the visible caption path without waiting for an in-progress game.
 
@@ -79,6 +82,8 @@ In Replay File mode, pausing the video sends `state: "paused"` to the backend, w
 Live Replay prioritizes structured game data:
 
 - Exact unseen play-by-play events produce `feed` captions.
+- Feed captions are emitted first from templates so the UI does not wait for OpenAI or vision calls.
+- Enriched captions are sent later as `caption_update` and merged by `event_id` in the frontend.
 - Already elapsed feed context can produce `feed_context_with_vision` captions.
 - Vision observations can support captions when `LIVE_VISION_ENABLED=1`.
 - Vision-only behavior should be cautious because official play-by-play is the source of truth.
@@ -106,7 +111,8 @@ Important event types:
 
 - `session_ready`: metadata and warnings.
 - `tick`: replay time, duration, period, and clock.
-- `caption`: generated caption and metadata.
+- `caption`: immediate generated caption and metadata.
+- `caption_update`: async enriched update for a previous caption.
 - `complete`: replay finished.
 - `stopped`: stop request completed.
 - `error`: failure state.
@@ -151,6 +157,7 @@ GET /live/uploads/{upload_id}
 ```
 
 This avoids depending on Supabase Storage limits for larger replay files during local development.
+Upload mode requires `VITE_BACKEND_URL`; it does not fall back to Supabase Storage.
 
 ## Game Search
 
@@ -176,10 +183,11 @@ For local testing:
 
 ```json
 {
-  "cadence_sec": 3,
-  "window_sec": 6,
+  "cadence_sec": 1,
+  "window_sec": 2,
   "replay_speed": 1,
-  "clock_mode": "replay_media"
+  "clock_mode": "replay_media",
+  "include_knowledge": false
 }
 ```
 
@@ -191,7 +199,8 @@ For YouTube Feed-Live:
 {
   "source_type": "youtube_embed",
   "clock_mode": "feed_live",
-  "cadence_sec": 3,
-  "window_sec": 6
+  "cadence_sec": 1,
+  "window_sec": 2,
+  "include_knowledge": false
 }
 ```

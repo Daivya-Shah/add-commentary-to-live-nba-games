@@ -205,7 +205,7 @@ npm run dev:backend  # API only (expects backend/.venv)
 
 The **Live Replay Desk** is available at `/live` when `VITE_BACKEND_URL` points at the Python API. It treats a prerecorded video as a live source, aligns replay time to an NBA game id / period / clock, loads rosters and play-by-play with `nba_api`, builds an in-memory pregame knowledge packet, and streams text captions over SSE.
 
-V1 defaults to 3-second chunks and a 6-second rolling window. Structured play-by-play is treated as the source of truth; vision is used as gated visual evidence or cautious `vision_only` fallback commentary. Live review metadata can be persisted to the `live_sessions` and `live_captions` tables when backend Supabase service credentials are configured.
+V1 defaults to 1-second chunks and a 2-second rolling window. Structured play-by-play is treated as the source of truth; vision is used as gated visual evidence or cautious `vision_only` fallback commentary. Live review metadata can be persisted to the `live_sessions` and `live_captions` tables when backend Supabase service credentials are configured.
 
 ---
 
