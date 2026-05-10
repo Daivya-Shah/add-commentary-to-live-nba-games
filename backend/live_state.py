@@ -14,6 +14,9 @@ from live_kb import PregameKnowledgeBase
 from openai_retry import with_openai_retry
 
 
+LIVE_TEXT_MODEL_DEFAULT = "gpt-5.4-nano"
+
+
 _ACTION_DETAIL_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\balley[- ]oop\b", "alley-oop finish"),
     (r"\bputback\b|\bput back\b", "putback"),
@@ -358,18 +361,17 @@ async def generate_caption_text(
         "Return plain text only."
     )
     client = AsyncOpenAI()
+    model = live_text_model()
 
     async def _call():
         return await client.chat.completions.create(
-            model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.45,
-            max_tokens=80,
+            **live_chat_completion_kwargs(model=model, max_tokens=80, temperature=0.45),
         )
 
     resp = await with_openai_retry(_call, label="live_caption")
     text = (resp.choices[0].message.content or "").strip().strip('"')
-    return text or template_caption(event, kb, visual), os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+    return text or template_caption(event, kb, visual), model
 
 
 async def generate_context_caption_text(
@@ -413,18 +415,31 @@ async def generate_context_caption_text(
         "Return plain text only."
     )
     client = AsyncOpenAI()
+    model = live_text_model()
 
     async def _call():
         return await client.chat.completions.create(
-            model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.35,
-            max_tokens=80,
+            **live_chat_completion_kwargs(model=model, max_tokens=80, temperature=0.35),
         )
 
     resp = await with_openai_retry(_call, label="live_context_caption")
     text = (resp.choices[0].message.content or "").strip().strip('"')
-    return text or template_context_caption(context, visual), os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+    return text or template_context_caption(context, visual), model
+
+
+def live_text_model() -> str:
+    return os.getenv("OPENAI_LIVE_TEXT_MODEL") or LIVE_TEXT_MODEL_DEFAULT
+
+
+def live_chat_completion_kwargs(*, model: str, max_tokens: int, temperature: float) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"model": model}
+    if model.startswith("gpt-5"):
+        kwargs["max_completion_tokens"] = max_tokens
+        return kwargs
+    kwargs["temperature"] = temperature
+    kwargs["max_tokens"] = max_tokens
+    return kwargs
 
 
 def template_caption(

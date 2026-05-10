@@ -29,7 +29,8 @@ Used by `backend/main.py`.
 | `OPENAI_API_KEY` | For real AI behavior | Enables vision, text commentary, summary alignment, live vision captions, and TTS. Without it, analysis falls back to templates and voiceover export is unavailable. |
 | `OPENAI_VISION_MODEL` | No | Vision model for clip analysis. Default: `gpt-4o-mini`. |
 | `OPENAI_VISION_IMAGE_DETAIL` | No | Image detail for OpenAI vision calls: `low`, `high`, or `auto`. Default: `high`. |
-| `OPENAI_TEXT_MODEL` | No | Text model for commentary. Default: `gpt-4o-mini`. |
+| `OPENAI_TEXT_MODEL` | No | Text model for offline commentary and summary alignment. Default: `gpt-4o-mini`. |
+| `OPENAI_LIVE_TEXT_MODEL` | No | Text model for Live Replay caption enrichment. Default: `gpt-5.4-nano`. |
 | `OPENAI_TTS_MODEL` | No | TTS model. Default: `tts-1`. |
 | `OPENAI_TTS_VOICE` | No | TTS voice. Default: `onyx`. |
 | `FRAME_SAMPLE_COUNT` | No | Number of frames sampled from clips. Default: `16`. |
@@ -51,6 +52,7 @@ OPENAI_API_KEY=...
 OPENAI_VISION_MODEL=gpt-4o-mini
 OPENAI_VISION_IMAGE_DETAIL=high
 OPENAI_TEXT_MODEL=gpt-4o-mini
+OPENAI_LIVE_TEXT_MODEL=gpt-5.4-nano
 OPENAI_TTS_MODEL=tts-1
 OPENAI_TTS_VOICE=onyx
 FRAME_SAMPLE_COUNT=16

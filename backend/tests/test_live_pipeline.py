@@ -27,6 +27,8 @@ from live_state import (
     context_team_name,
     feed_context_to_payload,
     generate_context_caption_text,
+    live_chat_completion_kwargs,
+    live_text_model,
     template_caption,
     template_context_caption,
 )
@@ -75,6 +77,19 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(kb.team_names, ["Boston Celtics"])
         self.assertEqual(kb.facts_for("Jaylen Brown", "Boston Celtics", limit=3), [])
+
+    def test_live_text_model_defaults_to_gpt5_nano(self):
+        with patch.dict(os.environ, {"OPENAI_TEXT_MODEL": "gpt-4o-mini"}, clear=True):
+            self.assertEqual(live_text_model(), "gpt-5.4-nano")
+            kwargs = live_chat_completion_kwargs(model=live_text_model(), max_tokens=80, temperature=0.45)
+        self.assertEqual(kwargs["model"], "gpt-5.4-nano")
+        self.assertEqual(kwargs["max_completion_tokens"], 80)
+        self.assertNotIn("max_tokens", kwargs)
+        self.assertNotIn("temperature", kwargs)
+
+    def test_live_text_model_env_override(self):
+        with patch.dict(os.environ, {"OPENAI_LIVE_TEXT_MODEL": "gpt-5-nano"}, clear=True):
+            self.assertEqual(live_text_model(), "gpt-5-nano")
 
     def test_team_resolver_accepts_name_and_abbreviation(self):
         self.assertEqual(resolve_nba_team("WAS").abbreviation, "WAS")
