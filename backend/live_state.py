@@ -145,7 +145,7 @@ class LiveStateReconciler:
             recent_captions=self.recent_captions,
             visual=visual,
         )
-        self._remember(text)
+        self.remember_caption(text)
         context = FeedContext(
             period=event.period,
             clock=event.clock,
@@ -185,7 +185,7 @@ class LiveStateReconciler:
             self.last_possession_team = event.team_name
         self.last_event_type = event.event_type
         text = template_caption(event, self.kb, visual)
-        self._remember(text)
+        self.remember_caption(text)
         context = FeedContext(
             period=event.period,
             clock=event.clock,
@@ -274,7 +274,7 @@ class LiveStateReconciler:
             recent_captions=self.recent_captions,
             visual=visual,
         )
-        self._remember(text)
+        self.remember_caption(text)
         return CaptionDecision(
             event_id=event_id,
             period=period,
@@ -293,7 +293,7 @@ class LiveStateReconciler:
             feed_context=feed_context_to_payload(context),
         )
 
-    def _remember(self, text: str) -> None:
+    def remember_caption(self, text: str) -> None:
         self.recent_captions.append(text)
         del self.recent_captions[:-5]
 

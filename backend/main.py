@@ -607,28 +607,33 @@ async def persist_live_event_to_supabase(session_id: str, event: dict[str, Any])
                     },
                 )
                 log_live_persist_failure(response, event_type)
-            elif event_type == "caption":
+            elif event_type in {"caption", "caption_update"}:
+                caption_payload = {
+                    "session_id": session_id,
+                    "event_id": event.get("event_id"),
+                    "period": event.get("period"),
+                    "game_clock": event.get("clock"),
+                    "event_type": event.get("event_type"),
+                    "player_name": event.get("player_name"),
+                    "team_name": event.get("team_name"),
+                    "score": event.get("score"),
+                    "caption_text": event.get("text"),
+                    "source": event.get("source"),
+                    "confidence": event.get("confidence"),
+                    "latency_ms": event.get("latency_ms"),
+                    "model_name": event.get("model_name"),
+                    "feed_description": event.get("feed_description"),
+                    "visual_summary": event.get("visual_summary"),
+                    "feed_context_json": event.get("feed_context"),
+                    "caption_stage": event.get("caption_stage") or "initial",
+                    "enriched_from_event_id": event.get("enriched_from_event_id"),
+                }
+                if event.get("generated_at"):
+                    caption_payload["generated_at"] = event.get("generated_at")
                 response = await client.post(
                     f"{base}/rest/v1/live_captions",
                     headers=headers,
-                    json={
-                        "session_id": session_id,
-                        "event_id": event.get("event_id"),
-                        "period": event.get("period"),
-                        "game_clock": event.get("clock"),
-                        "event_type": event.get("event_type"),
-                        "player_name": event.get("player_name"),
-                        "team_name": event.get("team_name"),
-                        "score": event.get("score"),
-                        "caption_text": event.get("text"),
-                        "source": event.get("source"),
-                        "confidence": event.get("confidence"),
-                        "latency_ms": event.get("latency_ms"),
-                        "model_name": event.get("model_name"),
-                        "feed_description": event.get("feed_description"),
-                        "visual_summary": event.get("visual_summary"),
-                        "feed_context_json": event.get("feed_context"),
-                    },
+                    json=caption_payload,
                 )
                 log_live_persist_failure(response, event_type)
             elif event_type in {"status", "complete", "stopped", "error"}:
@@ -823,8 +828,27 @@ async def search_live_games(
             detail="NBA game search timed out. Enter the game ID manually or try again.",
         ) from exc
     except Exception as exc:
+        if is_nba_provider_timeout(exc):
+            logger.warning("Live game search timed out: %s", exc)
+            raise HTTPException(
+                status_code=504,
+                detail="NBA game search timed out. Enter the game ID manually or try again.",
+            ) from exc
         logger.exception("Live game search failed")
         raise HTTPException(status_code=502, detail=f"NBA game search failed: {exc}") from exc
+
+
+def is_nba_provider_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    timeout_markers = (
+        "read timed out",
+        "read timeout",
+        "connect timeout",
+        "connection timed out",
+        "timed out",
+        "timeout",
+    )
+    return "stats.nba.com" in text and any(marker in text for marker in timeout_markers)
 
 
 @app.post("/live/sessions", response_model=LiveSessionResponse)

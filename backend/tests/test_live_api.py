@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -161,12 +162,84 @@ class LiveApiTests(unittest.TestCase):
         search.assert_called_once()
         self.assertEqual(search.call_args.kwargs["timeout"], 6)
 
+    def test_live_game_search_normalizes_stats_nba_timeout(self):
+        client = TestClient(main.app)
+        main._live_game_search_cache.clear()
+        raw_timeout = (
+            "HTTPSConnectionPool(host='stats.nba.com', port=443): "
+            "Read timed out. (read timeout=6)"
+        )
+        with patch.object(main, "search_nba_games", side_effect=RuntimeError(raw_timeout)):
+            response = client.get(
+                "/live/games/search",
+                params={
+                    "team": "WAS",
+                    "opponent": "CHA",
+                    "season": "2023-24",
+                    "season_type": "Regular Season",
+                },
+            )
+        main._live_game_search_cache.clear()
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(
+            response.json()["detail"],
+            "NBA game search timed out. Enter the game ID manually or try again.",
+        )
+
     def test_live_persist_failure_logs_response_body(self):
         response = main.httpx.Response(400, text='{"message":"missing column source_type"}')
         with self.assertLogs("vision2voice", level="WARNING") as logs:
             main.log_live_persist_failure(response, "session_ready")
         self.assertIn("HTTP 400", "\n".join(logs.output))
         self.assertIn("missing column source_type", "\n".join(logs.output))
+
+    def test_live_persistence_stores_caption_update_metadata(self):
+        posts = []
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                posts.append((url, json))
+                return main.httpx.Response(201)
+
+        event = {
+            "type": "caption_update",
+            "event_id": "evt-1",
+            "period": 1,
+            "clock": "11:59",
+            "event_type": "made_shot",
+            "text": "Enriched caption.",
+            "source": "feed",
+            "confidence": 0.9,
+            "latency_ms": 42,
+            "model_name": "mock-model",
+            "caption_stage": "enriched",
+            "generated_at": "2026-05-10T19:20:00+00:00",
+            "enriched_from_event_id": "evt-1",
+        }
+
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "key",
+        }
+        with patch.dict(main.os.environ, env), patch.object(main.httpx, "AsyncClient", FakeAsyncClient):
+            asyncio.run(main.persist_live_event_to_supabase("d8d3b9ef-5692-448b-b7a5-5cf606981fa5", event))
+
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(posts[0][0].endswith("/rest/v1/live_captions"))
+        payload = posts[0][1]
+        self.assertEqual(payload["caption_stage"], "enriched")
+        self.assertEqual(payload["generated_at"], "2026-05-10T19:20:00+00:00")
+        self.assertEqual(payload["enriched_from_event_id"], "evt-1")
 
 
 if __name__ == "__main__":

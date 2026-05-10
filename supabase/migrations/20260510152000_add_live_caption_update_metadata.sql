@@ -1,0 +1,4 @@
+ALTER TABLE public.live_captions
+ADD COLUMN IF NOT EXISTS caption_stage TEXT NOT NULL DEFAULT 'initial',
+ADD COLUMN IF NOT EXISTS generated_at TIMESTAMP WITH TIME ZONE,
+ADD COLUMN IF NOT EXISTS enriched_from_event_id TEXT;

@@ -154,14 +154,13 @@ class LiveSessionManager:
         if session.duration_sec is not None:
             replay_elapsed = min(session.duration_sec, replay_elapsed)
 
-        session.replay_elapsed = replay_elapsed
-        session.playback_rate = rate
-        session.status = "running" if state == "playing" else "paused"
-        session.playback_revision += 1
-        if state == "playing":
-            session.started_at = time.time() - (replay_elapsed / rate)
-
         async with session.playback_condition:
+            session.replay_elapsed = replay_elapsed
+            session.playback_rate = rate
+            session.status = "running" if state == "playing" else "paused"
+            session.playback_revision += 1
+            if state == "playing":
+                session.started_at = time.time() - (replay_elapsed / rate)
             session.playback_condition.notify_all()
 
         await self._broadcast(
@@ -570,6 +569,7 @@ class LiveSessionManager:
                 return
             decision.latency_ms = _latency_ms(session.started_at, decision.replay_time_sec, session.playback_rate)
             await self._emit_caption(session, decision, event_type="caption_update")
+            reconciler.remember_caption(decision.text)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
