@@ -184,6 +184,7 @@ const LiveReplay = () => {
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const handleStreamEventRef = useRef<(event: LiveStreamEvent) => void>(() => undefined);
 
   useEffect(() => {
     return () => {
@@ -246,6 +247,24 @@ const LiveReplay = () => {
     };
   }, [backendReady]);
 
+  useEffect(() => {
+    handleStreamEventRef.current = handleStreamEvent;
+  });
+
+  useEffect(() => {
+    if (!backendReady || !sessionId) return;
+    const source = openLiveEventSource(
+      sessionId,
+      (event) => handleStreamEventRef.current(event),
+      setStreamError,
+    );
+    eventSourceRef.current = source;
+    return () => {
+      source.close();
+      if (eventSourceRef.current === source) eventSourceRef.current = null;
+    };
+  }, [backendReady, sessionId]);
+
   const uploadFile = async (file: File): Promise<string> => {
     if (!backendReady) {
       throw new Error("Set VITE_BACKEND_URL and run the local backend before uploading live replay files.");
@@ -304,8 +323,6 @@ const LiveReplay = () => {
       setWarnings(session.warnings || []);
       setTeams(session.team_names || []);
       setEventCount(session.event_count || 0);
-      eventSourceRef.current?.close();
-      eventSourceRef.current = openLiveEventSource(session.session_id, handleStreamEvent, setStreamError);
       toast.success("Live replay session started");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Failed to start live replay";

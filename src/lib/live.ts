@@ -288,6 +288,10 @@ export function openLiveEventSource(
   onError: (message: string) => void,
 ): EventSource {
   const base = requireBackendBaseUrl();
+  if (typeof EventSource === "undefined") {
+    onError("Live event streaming is unavailable in this browser.");
+    return { close: () => undefined } as EventSource;
+  }
   const source = new EventSource(`${base}/live/sessions/${sessionId}/events`);
   const eventTypes = ["connected", "session_ready", "status", "caption", "caption_update", "tick", "complete", "stopped", "error", "ping"];
   for (const type of eventTypes) {
