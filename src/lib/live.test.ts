@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatLatency, formatReplayTime, normalizeYouTubeVideoId, uploadLiveReplayFile } from "@/lib/live";
+import {
+  formatLatency,
+  formatReplayTime,
+  normalizeYouTubeVideoId,
+  searchLiveGames,
+  startLiveSession,
+  stopLiveSession,
+  uploadLiveReplayFile,
+} from "@/lib/live";
 
 const originalFetch = global.fetch;
 
@@ -35,6 +43,7 @@ describe("live utilities", () => {
       expect(String(input)).toBe("http://127.0.0.1:8000/live/uploads?filename=wizards.mp4");
       expect(init?.method).toBe("POST");
       expect(init?.body).toBeInstanceOf(File);
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
       return new Response(
         JSON.stringify({
           upload_id: "abc",
@@ -51,5 +60,79 @@ describe("live utilities", () => {
       file_url: "http://127.0.0.1:8000/live/uploads/abc",
       size_bytes: 123,
     });
+  });
+
+  it("throws when stopping a live session fails", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://127.0.0.1:8000/live/sessions/missing/stop");
+      expect(init?.method).toBe("POST");
+      return new Response(JSON.stringify({ detail: "Live session not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await expect(stopLiveSession("missing")).rejects.toThrow("Live session not found");
+  });
+
+  it("searches live games with a client-side timeout signal", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toContain("/live/games/search?");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(
+        JSON.stringify([
+          {
+            game_id: "0022300157",
+            game_date: "2023-11-08",
+            season: "2023-24",
+            season_type: "Regular Season",
+            matchup: "WAS @ CHA",
+            team_abbreviation: "WAS",
+            opponent_abbreviation: "CHA",
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    await expect(
+      searchLiveGames({
+        team: "WAS",
+        opponent: "CHA",
+        season: "2023-24",
+        season_type: "Regular Season",
+        timeoutMs: 1000,
+      }),
+    ).resolves.toMatchObject([{ game_id: "0022300157" }]);
+  });
+
+  it("starts live sessions with a timeout signal", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://127.0.0.1:8000/live/sessions");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(
+        JSON.stringify({
+          session_id: "session-1",
+          status: "ready",
+          source_type: "replay_file",
+          team_names: ["WAS", "CHA"],
+          event_count: 1,
+          warnings: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    await expect(
+      startLiveSession({
+        file_url: "https://example.test/replay.mp4",
+        nba_game_id: "0022300157",
+        start_period: 1,
+        start_clock: "12:00",
+      }),
+    ).resolves.toMatchObject({ session_id: "session-1" });
   });
 });

@@ -13,6 +13,7 @@ export interface LiveSessionRequest {
   youtube_url?: string;
   youtube_video_id?: string;
   demo_feed_events?: boolean;
+  include_knowledge?: boolean;
 }
 
 export interface LiveSessionResponse {
@@ -55,7 +56,7 @@ export interface LiveGameSearchResult {
 }
 
 export interface LiveCaptionEvent {
-  type: "caption";
+  type: "caption" | "caption_update";
   session_id: string;
   event_id: string;
   period: number;
@@ -84,6 +85,9 @@ export interface LiveCaptionEvent {
     } | null;
   } | null;
   latency_ms: number;
+  caption_stage?: "initial" | "enriched" | string;
+  generated_at?: string;
+  enriched_from_event_id?: string | null;
 }
 
 export interface LiveTickEvent {
@@ -138,19 +142,31 @@ export function requireBackendBaseUrl(): string {
   return base;
 }
 
-export async function startLiveSession(body: LiveSessionRequest): Promise<LiveSessionResponse> {
+export async function startLiveSession(body: LiveSessionRequest, timeoutMs = 20000): Promise<LiveSessionResponse> {
   const base = requireBackendBaseUrl();
-  const res = await fetch(`${base}/live/sessions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail = data && typeof data.detail === "string" ? data.detail : `Live session failed (${res.status})`;
-    throw new Error(detail);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/live/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = data && typeof data.detail === "string" ? data.detail : `Live session failed (${res.status})`;
+      throw new Error(detail);
+    }
+    return data as LiveSessionResponse;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("NBA play-by-play loading timed out. Confirm the game ID and try again.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return data as LiveSessionResponse;
 }
 
 export async function fetchLiveTeams(): Promise<LiveTeamOption[]> {
@@ -164,20 +180,32 @@ export async function fetchLiveTeams(): Promise<LiveTeamOption[]> {
   return data as LiveTeamOption[];
 }
 
-export async function uploadLiveReplayFile(file: File): Promise<LiveUploadResponse> {
+export async function uploadLiveReplayFile(file: File, timeoutMs = 90000): Promise<LiveUploadResponse> {
   const base = requireBackendBaseUrl();
   const qs = new URLSearchParams({ filename: file.name || "replay.mp4" });
-  const res = await fetch(`${base}/live/uploads?${qs.toString()}`, {
-    method: "POST",
-    headers: { "Content-Type": file.type || "application/octet-stream" },
-    body: file,
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail = data && typeof data.detail === "string" ? data.detail : `Replay upload failed (${res.status})`;
-    throw new Error(detail);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/live/uploads?${qs.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = data && typeof data.detail === "string" ? data.detail : `Replay upload failed (${res.status})`;
+      throw new Error(detail);
+    }
+    return data as LiveUploadResponse;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Replay upload timed out. Try a smaller clip or use URL mode.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return data as LiveUploadResponse;
 }
 
 export async function searchLiveGames(params: {
@@ -186,6 +214,7 @@ export async function searchLiveGames(params: {
   season: string;
   season_type: string;
   limit?: number;
+  timeoutMs?: number;
 }): Promise<LiveGameSearchResult[]> {
   const base = requireBackendBaseUrl();
   const qs = new URLSearchParams({
@@ -195,18 +224,34 @@ export async function searchLiveGames(params: {
     season_type: params.season_type,
     limit: String(params.limit ?? 20),
   });
-  const res = await fetch(`${base}/live/games/search?${qs.toString()}`);
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const detail = data && typeof data.detail === "string" ? data.detail : `Game search failed (${res.status})`;
-    throw new Error(detail);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), params.timeoutMs ?? 9000);
+  try {
+    const res = await fetch(`${base}/live/games/search?${qs.toString()}`, { signal: controller.signal });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = data && typeof data.detail === "string" ? data.detail : `Game search failed (${res.status})`;
+      throw new Error(detail);
+    }
+    return data as LiveGameSearchResult[];
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("NBA game search timed out. Enter the game ID manually or try again.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return data as LiveGameSearchResult[];
 }
 
 export async function stopLiveSession(sessionId: string): Promise<void> {
   const base = requireBackendBaseUrl();
-  await fetch(`${base}/live/sessions/${sessionId}/stop`, { method: "POST" });
+  const res = await fetch(`${base}/live/sessions/${sessionId}/stop`, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    const detail = data && typeof data.detail === "string" ? data.detail : `Stop session failed (${res.status})`;
+    throw new Error(detail);
+  }
 }
 
 export async function updateLivePlayback(
@@ -233,7 +278,7 @@ export function openLiveEventSource(
 ): EventSource {
   const base = requireBackendBaseUrl();
   const source = new EventSource(`${base}/live/sessions/${sessionId}/events`);
-  const eventTypes = ["connected", "session_ready", "status", "caption", "tick", "complete", "stopped", "error", "ping"];
+  const eventTypes = ["connected", "session_ready", "status", "caption", "caption_update", "tick", "complete", "stopped", "error", "ping"];
   for (const type of eventTypes) {
     source.addEventListener(type, (message) => {
       try {

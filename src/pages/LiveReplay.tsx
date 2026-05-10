@@ -1,4 +1,4 @@
-import { AlertTriangle, Eraser, FileVideo, Play, Radio, RotateCcw, Search, Square, UploadCloud, Youtube } from "lucide-react";
+import { AlertTriangle, Eraser, ExternalLink, FileVideo, Play, Radio, RotateCcw, Search, Square, UploadCloud, Youtube } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { supabase } from "@/integrations/supabase/client";
 import { Marker, Masthead, Rule, Stage } from "@/components/almanac";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { cn } from "@/lib/utils";
@@ -30,12 +29,94 @@ import {
 
 type SetupMode = "upload" | "url" | "youtube";
 type ActiveSourceType = "replay_file" | "youtube_embed";
+type StartPhase = "idle" | "uploading" | "creating_session" | "waiting_for_video" | "ready" | "error";
+
+declare global {
+  interface Window {
+    YT?: {
+      Player: new (
+        elementId: string,
+        options: {
+          events?: {
+            onError?: (event: { data?: number }) => void;
+          };
+        },
+      ) => { destroy?: () => void };
+    };
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
 
 const sourceLabel: Record<string, string> = {
   feed: "FEED",
   feed_with_vision: "FEED+VISION",
   feed_context_with_vision: "CTX+VISION",
 };
+
+const blockedYouTubeErrorCodes = new Set([100, 101, 150]);
+
+function YouTubeBroadcastPlayer({
+  videoId,
+  embedSrc,
+  onBlocked,
+}: {
+  videoId: string;
+  embedSrc: string;
+  onBlocked: (code: number) => void;
+}) {
+  const playerId = useMemo(() => `youtube-player-${videoId}`, [videoId]);
+  const playerRef = useRef<{ destroy?: () => void } | null>(null);
+  const [apiReady, setApiReady] = useState(Boolean(window.YT?.Player));
+
+  useEffect(() => {
+    if (window.YT?.Player) {
+      setApiReady(true);
+      return;
+    }
+    const previousReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previousReady?.();
+      setApiReady(true);
+    };
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    return () => {
+      if (window.onYouTubeIframeAPIReady) window.onYouTubeIframeAPIReady = previousReady;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!apiReady || !window.YT?.Player) return;
+    playerRef.current?.destroy?.();
+    playerRef.current = new window.YT.Player(playerId, {
+      events: {
+        onError: (event) => {
+          const code = Number(event.data);
+          if (blockedYouTubeErrorCodes.has(code)) onBlocked(code);
+        },
+      },
+    });
+    return () => {
+      playerRef.current?.destroy?.();
+      playerRef.current = null;
+    };
+  }, [apiReady, onBlocked, playerId]);
+
+  return (
+    <iframe
+      id={playerId}
+      title="YouTube broadcast"
+      src={embedSrc}
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      allowFullScreen
+      className="absolute inset-0 h-full w-full border-0"
+    />
+  );
+}
 
 const LiveReplay = () => {
   const [mode, setMode] = usePersistentState<SetupMode>("vision2voice.live.mode.v1", "upload");
@@ -55,6 +136,7 @@ const LiveReplay = () => {
     "vision2voice.live.activeYoutubeVideoId.v1",
     null,
   );
+  const [youtubeEmbedError, setYoutubeEmbedError] = useState<number | null>(null);
   const [gameId, setGameId] = usePersistentState("vision2voice.live.gameId.v1", "");
   const [teamQuery, setTeamQuery] = usePersistentState("vision2voice.live.teamQuery.v1", "");
   const [opponentQuery, setOpponentQuery] = usePersistentState("vision2voice.live.opponentQuery.v1", "");
@@ -71,6 +153,10 @@ const LiveReplay = () => {
   const [selectedGame, setSelectedGame, clearSelectedGame] = usePersistentState<LiveGameSearchResult | null>(
     "vision2voice.live.selectedGame.v1",
     null,
+  );
+  const [includeKnowledge, setIncludeKnowledge] = usePersistentState(
+    "vision2voice.live.includeKnowledge.v1",
+    false,
   );
   const [searchingGames, setSearchingGames] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -91,6 +177,7 @@ const LiveReplay = () => {
   const [progress, setProgress] = usePersistentState("vision2voice.live.progress.v1", 0);
   const [liveClock, setLiveClock] = usePersistentState("vision2voice.live.clock.v1", "—");
   const [busy, setBusy] = useState(false);
+  const [startPhase, setStartPhase] = useState<StartPhase>("idle");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -103,13 +190,11 @@ const LiveReplay = () => {
     };
   }, [previewUrl]);
 
+  useEffect(() => {
+    setYoutubeEmbedError(null);
+  }, [activeYouTubeVideoId, youtubeUrl]);
+
   const youtubeVideoId = useMemo(() => normalizeYouTubeVideoId(youtubeUrl), [youtubeUrl]);
-  const canStart = Boolean(
-    gameId.trim() &&
-      (mode === "youtube"
-        ? youtubeVideoId
-        : startClock.trim() && (mode === "url" ? videoUrl.trim() : videoFile)),
-  );
   const backendReady = useMemo(() => {
     try {
       requireBackendBaseUrl();
@@ -118,6 +203,12 @@ const LiveReplay = () => {
       return false;
     }
   }, []);
+  const canStart = Boolean(
+    gameId.trim() &&
+      (mode === "youtube"
+        ? youtubeVideoId
+        : startClock.trim() && (mode === "url" ? videoUrl.trim() : videoFile)),
+  );
 
   const isRunning = status === "running";
   const showDemoFeedControl = mode === "youtube" && import.meta.env.DEV;
@@ -127,6 +218,9 @@ const LiveReplay = () => {
       ? captions
       : captions.filter((caption) => caption.replay_time_sec <= videoCurrentTime + 0.75);
   const latestCaption = visibleCaptions[0];
+  const canStopSession = Boolean(
+    sessionId && !["idle", "preparing", "stopping", "stopped", "complete", "error"].includes(status),
+  );
 
   useEffect(() => {
     if (!backendReady) return;
@@ -144,23 +238,11 @@ const LiveReplay = () => {
   }, [backendReady]);
 
   const uploadFile = async (file: File): Promise<string> => {
-    if (backendReady) {
-      try {
-        const upload = await uploadLiveReplayFile(file);
-        return upload.file_url;
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Local replay upload failed");
-      }
+    if (!backendReady) {
+      throw new Error("Set VITE_BACKEND_URL and run the local backend before uploading live replay files.");
     }
-    const fileName = `live-replay/${Date.now()}_${file.name}`;
-    const { error } = await supabase.storage.from("videos").upload(fileName, file);
-    if (error) {
-      throw new Error(
-        `Upload failed: ${error.message}. Use URL mode or run the local backend so large replay files bypass Supabase Storage limits.`,
-      );
-    }
-    const { data } = supabase.storage.from("videos").getPublicUrl(fileName);
-    return data.publicUrl;
+    const upload = await uploadLiveReplayFile(file, 90000);
+    return upload.file_url;
   };
 
   const handleStart = async () => {
@@ -171,12 +253,18 @@ const LiveReplay = () => {
     setWarnings([]);
     setProgress(0);
     setStatus("preparing");
+    setStartPhase(mode === "upload" ? "uploading" : "creating_session");
+    setYoutubeEmbedError(null);
 
     try {
       const isYouTube = mode === "youtube";
-      const fileUrl = !isYouTube && mode === "upload" && videoFile ? await uploadFile(videoFile) : videoUrl.trim();
+      const fileUrl =
+        !isYouTube && mode === "upload" && videoFile
+          ? await uploadFile(videoFile)
+          : videoUrl.trim();
+      const nextPreviewUrl = isYouTube ? null : mode === "url" ? fileUrl : null;
+      setStartPhase("creating_session");
       if (previewUrl && previewUrl.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(isYouTube ? null : mode === "upload" && videoFile ? URL.createObjectURL(videoFile) : fileUrl);
       setActiveSourceType(isYouTube ? "youtube_embed" : "replay_file");
       setActiveYouTubeVideoId(isYouTube ? youtubeVideoId : null);
       setVideoCurrentTime(0);
@@ -185,8 +273,9 @@ const LiveReplay = () => {
         nba_game_id: gameId.trim(),
         start_period: Number(startPeriod) || 1,
         start_clock: startClock.trim() || "12:00",
-        cadence_sec: 3,
-        window_sec: 6,
+        cadence_sec: 1,
+        window_sec: 2,
+        include_knowledge: includeKnowledge,
         source_type: isYouTube ? "youtube_embed" : "replay_file",
         clock_mode: isYouTube ? "feed_live" : "replay_media",
         ...(isYouTube
@@ -196,9 +285,11 @@ const LiveReplay = () => {
               demo_feed_events: import.meta.env.DEV && demoFeedEvents,
             }
           : { file_url: fileUrl }),
-      });
+      }, 20000);
 
+      setPreviewUrl(nextPreviewUrl ?? (mode === "upload" && videoFile ? URL.createObjectURL(videoFile) : null));
       setSessionId(session.session_id);
+      setStartPhase(isYouTube ? "ready" : "waiting_for_video");
       setStatus(session.status);
       setActiveSourceType(session.source_type === "youtube_embed" ? "youtube_embed" : isYouTube ? "youtube_embed" : "replay_file");
       setWarnings(session.warnings || []);
@@ -211,6 +302,7 @@ const LiveReplay = () => {
       const message = e instanceof Error ? e.message : "Failed to start live replay";
       setStreamError(message);
       setStatus("error");
+      setStartPhase("error");
       toast.error(message);
     } finally {
       setBusy(false);
@@ -219,17 +311,33 @@ const LiveReplay = () => {
 
   const handleStreamEvent = (event: LiveStreamEvent) => {
     if (event.type === "caption") {
+      setStartPhase("ready");
       setCaptions((current) => [event, ...current].slice(0, 40));
       setStatus("running");
       return;
     }
+    if (event.type === "caption_update") {
+      setStartPhase("ready");
+      setCaptions((current) => {
+        const update = event as LiveCaptionEvent;
+        const index = current.findIndex((caption) => caption.event_id === update.event_id);
+        if (index < 0) return [update, ...current].slice(0, 40);
+        const next = [...current];
+        next[index] = { ...next[index], ...update };
+        return next;
+      });
+      setStatus("running");
+      return;
+    }
     if (event.type === "tick") {
+      setStartPhase("ready");
       setLiveClock(`Q${event.period} ${event.clock}`);
       setProgress(event.duration_sec ? Math.min(100, (event.replay_time_sec / event.duration_sec) * 100) : 0);
       if (typeof event.event_count === "number") setEventCount(event.event_count);
       return;
     }
     if (event.type === "session_ready") {
+      setStartPhase("ready");
       setTeams(Array.isArray(event.team_names) ? event.team_names : []);
       setWarnings(Array.isArray(event.warnings) ? event.warnings : []);
       setStatus(String(event.status || "ready"));
@@ -244,11 +352,14 @@ const LiveReplay = () => {
     }
     if (event.type === "status" || event.type === "complete" || event.type === "stopped") {
       setStatus(String(event.status || event.type));
+      if (event.type === "complete" || event.type === "stopped") setStartPhase("idle");
+      else if (event.status === "running" || event.status === "paused" || event.status === "ready") setStartPhase("ready");
       if (event.type === "complete" || event.type === "stopped") eventSourceRef.current?.close();
       return;
     }
     if (event.type === "error") {
       setStatus("error");
+      setStartPhase("error");
       setStreamError(String(event.error || "Live replay failed"));
       eventSourceRef.current?.close();
     }
@@ -256,9 +367,18 @@ const LiveReplay = () => {
 
   const handleStop = async () => {
     if (!sessionId) return;
-    await stopLiveSession(sessionId);
-    eventSourceRef.current?.close();
-    setStatus("stopping");
+    setStreamError(null);
+    try {
+      await stopLiveSession(sessionId);
+      eventSourceRef.current?.close();
+      setStatus("stopping");
+      setStartPhase("idle");
+      toast.success("Session stopping");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to stop live session";
+      setStreamError(message);
+      toast.error(message);
+    }
   };
 
   const handleGameSearch = async () => {
@@ -276,6 +396,7 @@ const LiveReplay = () => {
         season: seasonQuery.trim(),
         season_type: seasonType,
         limit: 20,
+        timeoutMs: 8000,
       });
       setGameResults(results);
       if (results.length === 0) setSearchError("NO MATCHING GAMES FOUND.");
@@ -298,9 +419,10 @@ const LiveReplay = () => {
   };
 
   const handleResetSession = async () => {
-    if (sessionId && isRunning) {
+    const sessionToStop = sessionId;
+    if (sessionToStop) {
       try {
-        await stopLiveSession(sessionId);
+        await stopLiveSession(sessionToStop);
       } catch {
         // best-effort — we're tearing down anyway
       }
@@ -313,6 +435,7 @@ const LiveReplay = () => {
     setActiveYouTubeVideoId(null);
     clearSessionId();
     setStatus("idle");
+    setStartPhase("idle");
     clearCaptions();
     setWarnings([]);
     setTeams([]);
@@ -321,6 +444,7 @@ const LiveReplay = () => {
     setLiveClock("—");
     setGameResults([]);
     clearSelectedGame();
+    setYoutubeEmbedError(null);
     setStreamError(null);
     toast.success("Session reset");
   };
@@ -391,11 +515,33 @@ const LiveReplay = () => {
     setVideoCurrentTime(videoRef.current?.currentTime || 0);
   };
 
+  const handleYouTubeBlocked = useCallback((code: number) => {
+    setYoutubeEmbedError(code);
+    setStreamError(null);
+  }, []);
+
+  const handleSwitchToReplayUpload = async () => {
+    await handleResetSession();
+    setMode("upload");
+  };
+
   const teamMatchup = teams.length >= 2 ? `${teams[0]} · ${teams[1]}` : teams[0] || "AWAITING TEAMS";
   const shortSession = sessionId?.slice(0, 8).toUpperCase() || "—";
   const youtubeEmbedSrc = activeYouTubeVideoId
     ? `https://www.youtube.com/embed/${activeYouTubeVideoId}?enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&rel=0&modestbranding=1`
     : null;
+  const youtubeWatchUrl = activeYouTubeVideoId ? `https://www.youtube.com/watch?v=${activeYouTubeVideoId}` : youtubeUrl.trim();
+  const startButtonLabel =
+    startPhase === "uploading"
+      ? "UPLOADING…"
+      : startPhase === "creating_session"
+        ? "LOADING NBA FEED…"
+        : startPhase === "waiting_for_video"
+          ? "PREPARING VIDEO…"
+          : mode === "youtube"
+            ? "START LIVE FEED"
+            : "START REPLAY";
+  const statusLabel = startPhase === "waiting_for_video" ? "PREPARING VIDEO" : status.toUpperCase();
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -415,7 +561,7 @@ const LiveReplay = () => {
                 isRunning ? "animate-live-blink bg-court" : "bg-foreground/30",
               )}
             />
-            {status.toUpperCase()}
+            {statusLabel}
           </span>
         }
       />
@@ -535,7 +681,6 @@ const LiveReplay = () => {
             <section className="mt-12">
               <Rule label="B / GAME" marker="NBA_API" />
               <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-                {/* Search panel */}
                 <div className="border border-foreground/25 p-5">
                   <Marker tone="muted">SEARCH BY MATCHUP</Marker>
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -643,7 +788,6 @@ const LiveReplay = () => {
                   )}
                 </div>
 
-                {/* Manual + schedule + start */}
                 <div className="space-y-6">
                   <div>
                     <Marker tone="muted">MANUAL ENTRY</Marker>
@@ -690,6 +834,16 @@ const LiveReplay = () => {
                     </div>
                   </div>
 
+                  <label className="flex items-center gap-3 border border-foreground/25 px-3 py-2 font-mono text-[10px] uppercase tracked text-foreground/60">
+                    <input
+                      type="checkbox"
+                      checked={includeKnowledge}
+                      onChange={(e) => setIncludeKnowledge(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-current"
+                    />
+                    Include extra player/team knowledge
+                  </label>
+
                   <div className="border-t border-foreground/40 pt-6">
                     <Button
                       variant="default"
@@ -699,8 +853,13 @@ const LiveReplay = () => {
                       onClick={handleStart}
                     >
                       <Radio />
-                      {busy ? "STARTING…" : mode === "youtube" ? "START LIVE FEED" : "START REPLAY"}
+                      {busy ? startButtonLabel : mode === "youtube" ? "START LIVE FEED" : "START REPLAY"}
                     </Button>
+                    {streamError && !inBroadcast && (
+                      <p className="mt-3 font-mono text-[10px] uppercase tracked text-court">
+                        ! {streamError}
+                      </p>
+                    )}
                     {!canStart && (
                       <p className="mt-3 font-mono text-[10px] uppercase tracked text-foreground/45">
                         {mode === "youtube"
@@ -732,7 +891,7 @@ const LiveReplay = () => {
                       isRunning ? "animate-live-blink bg-court" : "bg-foreground/30",
                     )}
                   />
-                  {isRunning ? "ON AIR" : status.toUpperCase()}
+                  {isRunning ? "ON AIR" : statusLabel}
                 </span>
                 <span className="text-foreground">{teamMatchup}</span>
                 <span className="text-foreground/55">{liveClock}</span>
@@ -750,12 +909,12 @@ const LiveReplay = () => {
                       PLAY
                     </Button>
                   )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!sessionId || !isRunning}
-                    onClick={handleStop}
-                  >
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!canStopSession}
+                      onClick={handleStop}
+                    >
                     <Square />
                     STOP
                   </Button>
@@ -796,13 +955,42 @@ const LiveReplay = () => {
                     bottomRight={<Marker tone="muted">{shortSession}</Marker>}
                   >
                     {activeSourceType === "youtube_embed" && youtubeEmbedSrc ? (
-                      <iframe
-                        title="YouTube broadcast"
-                        src={youtubeEmbedSrc}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        allowFullScreen
-                        className="absolute inset-0 h-full w-full border-0"
-                      />
+                      youtubeEmbedError ? (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 bg-background px-6 text-center">
+                          <Youtube className="h-10 w-10 text-court" strokeWidth={1.25} />
+                          <div>
+                            <Marker tone="accent">EMBED BLOCKED</Marker>
+                            <p className="mt-3 max-w-md font-mono text-[11px] uppercase tracked text-foreground/60">
+                              YOUTUBE WILL NOT PLAY THIS VIDEO EMBEDDED HERE. NBA FEED CAPTIONS CAN CONTINUE WITHOUT VIDEO PLAYBACK.
+                            </p>
+                            <p className="mt-2 font-mono text-[10px] uppercase tracked text-foreground/40">
+                              ERROR {youtubeEmbedError}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-center gap-3">
+                            <Button asChild variant="accent" size="sm">
+                              <a href={youtubeWatchUrl} target="_blank" rel="noreferrer">
+                                <ExternalLink />
+                                OPEN IN YOUTUBE
+                              </a>
+                            </Button>
+                            <Button variant="secondary" size="sm" onClick={() => toast.success("Continuing feed-only captions")}>
+                              <Radio />
+                              CONTINUE FEED ONLY
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={handleSwitchToReplayUpload}>
+                              <UploadCloud />
+                              USE REPLAY FILE
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <YouTubeBroadcastPlayer
+                          videoId={activeYouTubeVideoId || ""}
+                          embedSrc={youtubeEmbedSrc}
+                          onBlocked={handleYouTubeBlocked}
+                        />
+                      )
                     ) : previewUrl ? (
                       <video
                         ref={videoRef}
@@ -851,7 +1039,7 @@ const LiveReplay = () => {
                       <Marker>D / CAPTION FEED</Marker>
                       <span className="font-mono text-[10px] uppercase tracked tabular text-foreground/45">
                         {String(visibleCaptions.length).padStart(2, "0")} LINES ·{" "}
-                        {activeSourceType === "youtube_embed" ? "FEED LIVE" : "3S CADENCE"}
+                        {activeSourceType === "youtube_embed" ? "FEED LIVE" : "1S CADENCE"}
                       </span>
                     </div>
                     <Button
@@ -898,6 +1086,7 @@ const LiveReplay = () => {
                               </span>
                               <span className="text-foreground/55">
                                 {sourceLabel[caption.source] || caption.source.toUpperCase()}
+                                {caption.caption_stage === "enriched" ? " · UPDATED" : ""}
                               </span>
                             </div>
                             <p className="mt-2 font-body text-base leading-[1.45] text-foreground">
