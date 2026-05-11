@@ -18,7 +18,17 @@ from live_game_data import (
     search_nba_games,
 )
 from live_kb import build_pregame_kb
-from live_sessions import LiveSessionConfig, LiveSessionManager, _download_video_temp
+from live_sessions import (
+    DetectedGameClock,
+    LiveSession,
+    LiveSessionConfig,
+    LiveSessionManager,
+    _caption_for_highlight_clip,
+    _coerce_confidence,
+    _download_video_temp,
+    _normalize_detected_clock,
+    vision_chat_completion_kwargs,
+)
 from live_state import (
     FeedContext,
     LiveStateReconciler,
@@ -47,6 +57,25 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
         period, clock, _ = align_replay_time(4, "0:10", 20)
         self.assertEqual(period, 5)
         self.assertEqual(clock, "4:50")
+
+    def test_normalizes_detected_scorebug_clock(self):
+        detected = _normalize_detected_clock(
+            {
+                "period": "Q2",
+                "clock": " 7 : 04 ",
+                "score": "28-25",
+                "confidence": 0.91,
+                "raw_text": "WAS 28 CHA 25 Q2 7:04",
+            }
+        )
+        self.assertIsNotNone(detected)
+        self.assertEqual(detected.period, 2)
+        self.assertEqual(detected.clock, "7:04")
+        self.assertEqual(detected.score, "28-25")
+
+    def test_rejects_low_confidence_detected_scorebug_clock(self):
+        detected = _normalize_detected_clock({"period": 1, "clock": "11:58", "confidence": 0.1})
+        self.assertIsNone(detected)
 
     def test_pregame_kb_player_lookup(self):
         package = LiveGamePackage(
@@ -90,6 +119,54 @@ class LivePipelineUnitTests(unittest.IsolatedAsyncioTestCase):
     def test_live_text_model_env_override(self):
         with patch.dict(os.environ, {"OPENAI_LIVE_TEXT_MODEL": "gpt-5-nano"}, clear=True):
             self.assertEqual(live_text_model(), "gpt-5-nano")
+
+    def test_vision_model_defaults_to_gpt5_mini_kwargs(self):
+        with patch.dict(os.environ, {}, clear=True):
+            kwargs = vision_chat_completion_kwargs(max_tokens=100)
+        self.assertEqual(kwargs["model"], "gpt-5-mini")
+        self.assertEqual(kwargs["max_completion_tokens"], 100)
+        self.assertEqual(kwargs["reasoning_effort"], "minimal")
+        self.assertEqual(kwargs["verbosity"], "low")
+        self.assertNotIn("max_tokens", kwargs)
+
+    def test_vision_model_legacy_override_uses_max_tokens(self):
+        with patch.dict(os.environ, {"OPENAI_VISION_MODEL": "gpt-4o-mini"}, clear=True):
+            kwargs = vision_chat_completion_kwargs(max_tokens=100)
+        self.assertEqual(kwargs["model"], "gpt-4o-mini")
+        self.assertEqual(kwargs["max_tokens"], 100)
+        self.assertNotIn("max_completion_tokens", kwargs)
+
+    def test_vision_confidence_accepts_text_labels(self):
+        self.assertEqual(_coerce_confidence("medium", default=0.4), 0.55)
+        self.assertEqual(_coerce_confidence("low", default=0.4), 0.32)
+        self.assertEqual(_coerce_confidence("bad", default=0.4), 0.4)
+
+    def test_highlight_caption_sanitizes_frame_diff_fallback(self):
+        decision = _caption_for_highlight_clip(
+            "session-1",
+            VisualObservation("frame luminance changed by 3.5 points.", 0.3, changed=True),
+            replay_time_sec=11,
+        )
+        self.assertIsNone(decision)
+
+    def test_highlight_caption_skips_generic_possession_continues(self):
+        decision = _caption_for_highlight_clip(
+            "session-1",
+            VisualObservation("the possession continues.", 0.4, changed=True),
+            replay_time_sec=11,
+        )
+        self.assertIsNone(decision)
+
+    def test_highlight_caption_keeps_specific_visual_summary(self):
+        decision = _caption_for_highlight_clip(
+            "session-1",
+            VisualObservation("The ball-handler drives left as help defense steps into the lane", 0.74, changed=True),
+            replay_time_sec=11,
+        )
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.source, "vision_clip")
+        self.assertIn("drives left", decision.text)
 
     def test_team_resolver_accepts_name_and_abbreviation(self):
         self.assertEqual(resolve_nba_team("WAS").abbreviation, "WAS")
@@ -715,6 +792,9 @@ class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         manager = LiveSessionManager(provider=StaticGameDataProvider(package))
         manager._visual_observation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        manager._detect_start_clock = AsyncMock(  # type: ignore[method-assign]
+            return_value=DetectedGameClock(period=1, clock="12:00", confidence=0.9)
+        )
         fd, temp_video = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
 
@@ -838,6 +918,77 @@ class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session.replay_elapsed, paused_at)
             await manager.stop_session(session.session_id)
 
+    async def test_running_replay_clock_derives_from_media_sync_anchor(self):
+        manager = LiveSessionManager(provider=StaticGameDataProvider(LiveGamePackage(game_id="fixture")))
+        session = LiveSession(
+            session_id="session-clock",
+            config=LiveSessionConfig(
+                nba_game_id="fixture",
+                start_period=1,
+                start_clock="12:00",
+                clock_mode="replay_media",
+                source_type="youtube_watch",
+            ),
+            kb=build_pregame_kb(LiveGamePackage(game_id="fixture")),
+            events=[],
+            status="ready",
+        )
+        manager.sessions[session.session_id] = session
+
+        with patch("live_sessions.time.monotonic", return_value=100.0):
+            await manager.control_playback(
+                session.session_id,
+                state="playing",
+                replay_time_sec=10,
+                playback_rate=2,
+                duration_sec=40,
+            )
+        with patch("live_sessions.time.monotonic", return_value=103.25):
+            synced = manager._sync_running_replay_elapsed(session)
+
+        self.assertAlmostEqual(synced, 16.5)
+        self.assertAlmostEqual(session.replay_elapsed, 16.5)
+
+    async def test_paused_replay_clock_freezes_and_emits_supplied_tick(self):
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(
+            provider=StaticGameDataProvider(LiveGamePackage(game_id="fixture")),
+            event_sink=sink,
+        )
+        session = LiveSession(
+            session_id="session-paused-clock",
+            config=LiveSessionConfig(
+                nba_game_id="fixture",
+                start_period=1,
+                start_clock="12:00",
+                clock_mode="replay_media",
+                source_type="youtube_watch",
+            ),
+            kb=build_pregame_kb(LiveGamePackage(game_id="fixture")),
+            events=[],
+            status="ready",
+        )
+        manager.sessions[session.session_id] = session
+
+        await manager.control_playback(
+            session.session_id,
+            state="paused",
+            replay_time_sec=12,
+            playback_rate=1,
+            duration_sec=30,
+        )
+        with patch("live_sessions.time.monotonic", return_value=999.0):
+            synced = manager._sync_running_replay_elapsed(session)
+
+        self.assertEqual(synced, 12)
+        self.assertEqual(session.replay_elapsed, 12)
+        ticks = [event for event in emitted if event.get("type") == "tick"]
+        self.assertTrue(any(event.get("replay_time_sec") == 12 for event in ticks))
+
     async def test_seek_control_emits_tick_for_supplied_replay_time(self):
         package = LiveGamePackage(game_id="fixture")
         manager = LiveSessionManager(provider=StaticGameDataProvider(package))
@@ -877,6 +1028,308 @@ class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await stream.aclose()
             await manager.stop_session(session.session_id)
 
+    async def test_replay_file_feed_event_updates_tick_score(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Test Team", abbreviation="TST")],
+            events=[
+                LiveGameEvent(
+                    event_id="evt-score",
+                    period=1,
+                    clock="11:59",
+                    game_elapsed_sec=1,
+                    event_type="made_shot",
+                    description="Test Player makes 2PT layup",
+                    player_name="Test Player",
+                    team_name="Test Team",
+                    score="2-0",
+                )
+            ],
+        )
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=StaticGameDataProvider(package), event_sink=sink)
+        manager._visual_observation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        manager._detect_start_clock = AsyncMock(  # type: ignore[method-assign]
+            return_value=DetectedGameClock(period=1, clock="12:00", confidence=0.9)
+        )
+        fd, temp_video = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+
+        with patch("live_sessions._download_video_temp", AsyncMock(return_value=temp_video)), patch(
+            "live_sessions._video_duration_sec",
+            return_value=5.0,
+        ):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    file_url="https://example.test/video.mp4",
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    window_sec=2,
+                )
+            )
+            await manager.control_playback(
+                session.session_id,
+                state="playing",
+                replay_time_sec=1,
+                playback_rate=1,
+            )
+            for _ in range(20):
+                if any(event.get("type") == "tick" and event.get("score") == "2-0" for event in emitted):
+                    break
+                await asyncio.sleep(0.02)
+            await manager.stop_session(session.session_id)
+
+        self.assertTrue(any(event.get("type") == "caption" and event.get("score") == "2-0" for event in emitted))
+        self.assertTrue(any(event.get("type") == "tick" and event.get("score") == "2-0" for event in emitted))
+
+    async def test_replay_file_uses_detected_start_clock_before_alignment(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Test Team", abbreviation="TST")],
+            events=[
+                LiveGameEvent(
+                    event_id="evt-detected",
+                    period=2,
+                    clock="7:03",
+                    game_elapsed_sec=game_elapsed_sec(2, "7:03"),
+                    event_type="made_shot",
+                    description="Test Player makes 2PT layup",
+                    player_name="Test Player",
+                    team_name="Test Team",
+                    score="28-25",
+                )
+            ],
+        )
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=StaticGameDataProvider(package), event_sink=sink)
+        manager._visual_observation = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        manager._detect_start_clock = AsyncMock(  # type: ignore[method-assign]
+            return_value=DetectedGameClock(period=2, clock="7:04", confidence=0.9, score="28-25")
+        )
+        fd, temp_video = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+
+        with patch("live_sessions._download_video_temp", AsyncMock(return_value=temp_video)), patch(
+            "live_sessions._video_duration_sec",
+            return_value=5.0,
+        ):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    file_url="https://example.test/video.mp4",
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    window_sec=2,
+                )
+            )
+            await manager.control_playback(
+                session.session_id,
+                state="playing",
+                replay_time_sec=1,
+                playback_rate=1,
+            )
+            for _ in range(20):
+                if any(event.get("event_id") == "evt-detected" for event in emitted):
+                    break
+                await asyncio.sleep(0.02)
+            await manager.stop_session(session.session_id)
+
+        self.assertEqual(session.config.start_period, 2)
+        self.assertEqual(session.config.start_clock, "7:04")
+        self.assertTrue(any(event.get("type") == "status" and event.get("clock_detection") for event in emitted))
+        self.assertTrue(any(event.get("event_id") == "evt-detected" for event in emitted))
+
+    async def test_replay_file_without_detected_clock_uses_highlight_clip_mode(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            events=[
+                LiveGameEvent(
+                    event_id="official-event",
+                    period=1,
+                    clock="11:57",
+                    game_elapsed_sec=3,
+                    event_type="made_shot",
+                    description="Official feed event that should not drive highlight mode",
+                    score="2-0",
+                )
+            ],
+        )
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=StaticGameDataProvider(package), event_sink=sink)
+        manager._detect_start_clock = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        manager._visual_observation = AsyncMock(  # type: ignore[method-assign]
+            return_value=VisualObservation("a transition chance builds in the open floor", 0.68, changed=True)
+        )
+        fd, temp_video = tempfile.mkstemp(suffix=".mp4")
+        os.close(fd)
+
+        with patch("live_sessions._download_video_temp", AsyncMock(return_value=temp_video)), patch(
+            "live_sessions._video_duration_sec",
+            return_value=10.0,
+        ):
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    file_url="https://example.test/highlight.mp4",
+                    nba_game_id="fixture",
+                    cadence_sec=0.03,
+                    window_sec=2,
+                )
+            )
+            await manager.control_playback(
+                session.session_id,
+                state="playing",
+                replay_time_sec=3,
+                playback_rate=1,
+            )
+            for _ in range(20):
+                if any(event.get("source") == "vision_clip" for event in emitted):
+                    break
+                await asyncio.sleep(0.02)
+            await manager.stop_session(session.session_id)
+
+        captions = [event for event in emitted if event.get("type") == "caption"]
+        self.assertEqual(session.alignment_mode, "highlight_clip")
+        self.assertTrue(any(event.get("alignment_mode") == "highlight_clip" for event in emitted))
+        self.assertEqual(captions[0]["source"], "vision_clip")
+        self.assertEqual(captions[0]["period"], 0)
+        self.assertEqual(captions[0]["score"], None)
+        self.assertTrue(captions[0]["clock"].startswith("CLIP "))
+        self.assertFalse(any(event.get("event_id") == "official-event" for event in emitted))
+        self.assertTrue(any(event.get("type") == "tick" and event.get("score") is None for event in emitted))
+
+    async def test_highlight_clip_tick_uses_supplied_media_time_when_paused(self):
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(
+            provider=StaticGameDataProvider(LiveGamePackage(game_id="fixture")),
+            event_sink=sink,
+        )
+        session = LiveSession(
+            session_id="session-highlight-clock",
+            config=LiveSessionConfig(nba_game_id="fixture", clock_mode="replay_media"),
+            kb=build_pregame_kb(LiveGamePackage(game_id="fixture")),
+            events=[],
+            status="ready",
+            duration_sec=30,
+            alignment_mode="highlight_clip",
+        )
+        manager.sessions[session.session_id] = session
+
+        await manager.control_playback(
+            session.session_id,
+            state="paused",
+            replay_time_sec=9,
+            playback_rate=1,
+            duration_sec=30,
+        )
+
+        ticks = [event for event in emitted if event.get("type") == "tick"]
+        self.assertTrue(any(event.get("replay_time_sec") == 9 for event in ticks))
+        self.assertTrue(any(event.get("clock") == "CLIP 0:09" for event in ticks))
+        self.assertTrue(any(event.get("period") == 0 for event in ticks))
+        self.assertEqual(session.replay_elapsed, 9)
+
+    async def test_youtube_watch_replay_uses_player_clock_without_video_download(self):
+        package = LiveGamePackage(
+            game_id="fixture",
+            teams=[LiveTeam(team_id="1", name="Test Team", abbreviation="TST")],
+            events=[
+                LiveGameEvent(
+                    event_id="evt-youtube-watch",
+                    period=1,
+                    clock="11:55",
+                    game_elapsed_sec=5,
+                    event_type="made_shot",
+                    description="Test Player makes 3PT pullup jump shot",
+                    player_name="Test Player",
+                    team_name="Test Team",
+                    score="3-0",
+                )
+            ],
+        )
+        emitted: list[dict] = []
+
+        async def sink(session_id: str, payload: dict) -> None:
+            emitted.append(payload)
+
+        manager = LiveSessionManager(provider=StaticGameDataProvider(package), event_sink=sink)
+        with patch("live_sessions._download_video_temp", AsyncMock()) as download, patch(
+            "live_sessions._video_duration_sec"
+        ) as duration:
+            session = await manager.create_session(
+                LiveSessionConfig(
+                    nba_game_id="fixture",
+                    start_period=1,
+                    start_clock="12:00",
+                    cadence_sec=0.03,
+                    window_sec=2,
+                    clock_mode="replay_media",
+                    source_type="youtube_watch",
+                    youtube_video_id="dQw4w9WgXcQ",
+                )
+            )
+            await manager.control_playback(
+                session.session_id,
+                state="playing",
+                replay_time_sec=5,
+                playback_rate=1,
+                duration_sec=20,
+            )
+            for _ in range(20):
+                if any(event.get("type") == "caption" for event in emitted):
+                    break
+                await asyncio.sleep(0.02)
+            await manager.stop_session(session.session_id)
+
+        captions = [event for event in emitted if event.get("type") == "caption"]
+        self.assertEqual(len(captions), 1)
+        self.assertEqual(captions[0]["event_id"], "evt-youtube-watch")
+        self.assertEqual(captions[0]["source"], "feed")
+        download.assert_not_awaited()
+        duration.assert_not_called()
+
+    async def test_duration_control_clamps_youtube_watch_replay_time(self):
+        manager = LiveSessionManager(provider=StaticGameDataProvider(LiveGamePackage(game_id="fixture")))
+        session = await manager.create_session(
+            LiveSessionConfig(
+                nba_game_id="fixture",
+                start_period=1,
+                start_clock="12:00",
+                cadence_sec=1,
+                clock_mode="replay_media",
+                source_type="youtube_watch",
+                youtube_video_id="dQw4w9WgXcQ",
+            )
+        )
+        await manager.control_playback(
+            session.session_id,
+            state="paused",
+            replay_time_sec=99,
+            playback_rate=1,
+            duration_sec=12,
+        )
+        self.assertEqual(session.duration_sec, 12)
+        self.assertEqual(session.replay_elapsed, 12)
+        await manager.stop_session(session.session_id)
+
     async def test_session_stream_emits_feed_context_when_no_exact_event_matches(self):
         package = LiveGamePackage(
             game_id="fixture",
@@ -911,6 +1364,9 @@ class LivePipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         manager._visual_observation = AsyncMock(
             return_value=VisualObservation("players move through a half-court set", 0.6, changed=True)
         )  # type: ignore[method-assign]
+        manager._detect_start_clock = AsyncMock(  # type: ignore[method-assign]
+            return_value=DetectedGameClock(period=1, clock="11:45", confidence=0.9)
+        )
         fd, temp_video = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
 

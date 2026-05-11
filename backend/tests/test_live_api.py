@@ -41,7 +41,16 @@ class LiveApiTests(unittest.TestCase):
             state="paused",
             replay_time_sec=12.5,
             playback_rate=1.25,
+            duration_sec=None,
         )
+
+    def test_stop_unknown_live_session_is_idempotent(self):
+        client = TestClient(main.app)
+        with patch.object(main.live_sessions, "stop_session", AsyncMock(return_value=False)) as stop:
+            response = client.post("/live/sessions/missing/stop")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "stopped"})
+        stop.assert_awaited_once_with("missing")
 
     def test_youtube_live_session_does_not_require_file_url(self):
         client = TestClient(main.app)
@@ -99,6 +108,50 @@ class LiveApiTests(unittest.TestCase):
         config = create.await_args.args[0]
         self.assertTrue(config.include_knowledge)
 
+    def test_replay_session_can_omit_manual_start_clock(self):
+        client = TestClient(main.app)
+        fake_session = SimpleNamespace(
+            session_id="session-auto-clock",
+            status="ready",
+            config=SimpleNamespace(source_type="replay_file"),
+            kb=SimpleNamespace(team_names=["WAS", "CHA"], warnings=[]),
+            events=[],
+        )
+        with patch.object(main.live_sessions, "create_session", AsyncMock(return_value=fake_session)) as create:
+            response = client.post(
+                "/live/sessions",
+                json={
+                    "source_type": "replay_file",
+                    "file_url": "https://example.test/replay.mp4",
+                    "nba_game_id": "0022300157",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        config = create.await_args.args[0]
+        self.assertEqual(config.start_period, 1)
+        self.assertEqual(config.start_clock, "12:00")
+
+    def test_replay_session_can_omit_game_id_for_highlight_clips(self):
+        client = TestClient(main.app)
+        fake_session = SimpleNamespace(
+            session_id="session-highlight",
+            status="ready",
+            config=SimpleNamespace(source_type="replay_file"),
+            kb=SimpleNamespace(team_names=[], warnings=[]),
+            events=[],
+        )
+        with patch.object(main.live_sessions, "create_session", AsyncMock(return_value=fake_session)) as create:
+            response = client.post(
+                "/live/sessions",
+                json={
+                    "source_type": "replay_file",
+                    "file_url": "https://example.test/highlight.mp4",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        config = create.await_args.args[0]
+        self.assertEqual(config.nba_game_id, "")
+
     def test_youtube_live_session_rejects_missing_youtube_source(self):
         client = TestClient(main.app)
         response = client.post(
@@ -111,6 +164,55 @@ class LiveApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_youtube_watch_recorded_session_uses_replay_media_clock(self):
+        client = TestClient(main.app)
+        fake_session = SimpleNamespace(
+            session_id="session-watch",
+            status="ready",
+            config=SimpleNamespace(source_type="youtube_watch"),
+            kb=SimpleNamespace(team_names=["WAS", "CHA"], warnings=[]),
+            events=[],
+        )
+        with patch.object(main.live_sessions, "create_session", AsyncMock(return_value=fake_session)) as create:
+            response = client.post(
+                "/live/sessions",
+                json={
+                    "source_type": "youtube_watch",
+                    "youtube_video_id": "dQw4w9WgXcQ",
+                    "nba_game_id": "0022300157",
+                    "start_period": 1,
+                    "start_clock": "11:42",
+                    "clock_mode": "replay_media",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["source_type"], "youtube_watch")
+        config = create.await_args.args[0]
+        self.assertIsNone(config.file_url)
+        self.assertEqual(config.clock_mode, "replay_media")
+
+    def test_playback_control_accepts_duration_for_youtube_watch(self):
+        client = TestClient(main.app)
+        with patch.object(main.live_sessions, "control_playback", AsyncMock(return_value=True)) as control:
+            response = client.post(
+                "/live/sessions/session-1/playback",
+                json={
+                    "state": "playing",
+                    "replay_time_sec": 18.5,
+                    "playback_rate": 1,
+                    "duration_sec": 95.25,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        control.assert_awaited_once_with(
+            "session-1",
+            state="playing",
+            replay_time_sec=18.5,
+            playback_rate=1,
+            duration_sec=95.25,
+        )
 
     def test_live_game_detection_endpoint_is_removed(self):
         client = TestClient(main.app)

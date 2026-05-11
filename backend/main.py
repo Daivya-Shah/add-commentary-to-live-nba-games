@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 
 from jersey_resolve import enrich_timeline_segments, enrich_vision_with_nba_rosters
 from live_game_data import nba_team_options, search_nba_games
-from live_sessions import LiveSessionConfig, LiveSessionManager
+from live_sessions import LiveSessionConfig, LiveSessionManager, vision_chat_completion_kwargs
 from openai_retry import with_openai_retry
 from timeline import (
     commentary_lines_for_timeline,
@@ -90,14 +90,14 @@ class VoiceoverExportBody(BaseModel):
 
 class LiveSessionRequest(BaseModel):
     file_url: str | None = None
-    nba_game_id: str
+    nba_game_id: str = ""
     start_period: int = Field(default=1, ge=1, le=10)
     start_clock: str = "12:00"
     cadence_sec: float = Field(default=1.0, ge=1.0, le=10.0)
     window_sec: float = Field(default=2.0, ge=2.0, le=20.0)
     replay_speed: float = Field(default=1.0, ge=0.25, le=8.0)
     clock_mode: str = "replay_media"
-    source_type: str = Field(default="replay_file", pattern="^(replay_file|youtube_embed)$")
+    source_type: str = Field(default="replay_file", pattern="^(replay_file|youtube_embed|youtube_watch)$")
     youtube_url: str | None = None
     youtube_video_id: str | None = None
     demo_feed_events: bool = False
@@ -107,10 +107,12 @@ class LiveSessionRequest(BaseModel):
     def validate_source(self) -> "LiveSessionRequest":
         if self.source_type == "replay_file" and not (self.file_url or "").strip():
             raise ValueError("file_url is required for replay_file live sessions.")
-        if self.source_type == "youtube_embed":
+        if self.source_type in {"youtube_embed", "youtube_watch"}:
             if not ((self.youtube_video_id or "").strip() or (self.youtube_url or "").strip()):
-                raise ValueError("youtube_url or youtube_video_id is required for youtube_embed live sessions.")
-            if self.clock_mode == "replay_media":
+                raise ValueError("youtube_url or youtube_video_id is required for YouTube live sessions.")
+            if not self.nba_game_id.strip():
+                raise ValueError("nba_game_id is required for YouTube live sessions.")
+            if self.source_type == "youtube_embed" and self.clock_mode == "replay_media":
                 self.clock_mode = "feed_live"
         if self.clock_mode not in {"replay_media", "feed_live"}:
             raise ValueError("clock_mode must be replay_media or feed_live.")
@@ -121,6 +123,7 @@ class LivePlaybackControlRequest(BaseModel):
     state: str = Field(pattern="^(playing|paused)$")
     replay_time_sec: float = Field(default=0.0, ge=0.0)
     playback_rate: float = Field(default=1.0, ge=0.1, le=8.0)
+    duration_sec: float | None = Field(default=None, ge=0.1)
 
 
 class LiveSessionResponse(BaseModel):
@@ -331,10 +334,9 @@ async def vision_with_openai(frames: list[bytes]) -> dict[str, Any]:
 
     async def _vision_call():
         return await client.chat.completions.create(
-            model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": content}],
             response_format={"type": "json_object"},
-            max_tokens=1600,
+            **vision_chat_completion_kwargs(max_tokens=1600),
         )
 
     resp = await with_openai_retry(_vision_call, label="vision")
@@ -682,7 +684,7 @@ async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> An
 
     if os.getenv("OPENAI_API_KEY"):
         structured = await vision_with_openai(frames)
-        vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+        vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
     else:
         structured = vision_fallback()
         vision_model = "fallback-vision"
@@ -889,8 +891,6 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
 
 @app.get("/live/sessions/{session_id}/events")
 async def live_session_events(session_id: str) -> StreamingResponse:
-    if not live_sessions.get_session(session_id):
-        raise HTTPException(status_code=404, detail="Live session not found")
     return StreamingResponse(
         live_sessions.event_stream(session_id),
         media_type="text/event-stream",
@@ -912,6 +912,7 @@ async def control_live_session_playback(
         state=body.state,
         replay_time_sec=body.replay_time_sec,
         playback_rate=body.playback_rate,
+        duration_sec=body.duration_sec,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Live session not found")
@@ -922,7 +923,7 @@ async def control_live_session_playback(
 async def stop_live_session(session_id: str) -> dict[str, str]:
     stopped = await live_sessions.stop_session(session_id)
     if not stopped:
-        raise HTTPException(status_code=404, detail="Live session not found")
+        return {"status": "stopped"}
     return {"status": "stopping"}
 
 
