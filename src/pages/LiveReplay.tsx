@@ -52,9 +52,24 @@ const sourceLabel: Record<string, string> = {
   feed: "FEED",
   feed_with_vision: "FEED+VISION",
   feed_context_with_vision: "CTX+VISION",
+  vision_clip: "CLIP VISION",
 };
 
 const blockedYouTubeErrorCodes = new Set([100, 101, 150]);
+
+const formatClipClock = (seconds: number) => {
+  const total = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+};
+
+const formatLiveClock = (period?: number, clock?: string) => {
+  if (!clock) return "—";
+  return period && period > 0 ? `Q${period} ${clock}` : clock;
+};
+
+const formatCaptionClock = (caption: LiveCaptionEvent) =>
+  caption.period > 0 ? `Q${caption.period} · ${caption.clock}` : caption.clock;
 
 function YouTubeBroadcastPlayer({
   videoId,
@@ -162,8 +177,6 @@ const LiveReplay = () => {
   );
   const [searchingGames, setSearchingGames] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [startPeriod, setStartPeriod] = usePersistentState("vision2voice.live.startPeriod.v1", "1");
-  const [startClock, setStartClock] = usePersistentState("vision2voice.live.startClock.v1", "12:00");
   const [sessionId, setSessionId, clearSessionId] = usePersistentState<string | null>(
     "vision2voice.live.sessionId.v1",
     null,
@@ -178,12 +191,14 @@ const LiveReplay = () => {
   const [eventCount, setEventCount] = usePersistentState("vision2voice.live.eventCount.v1", 0);
   const [progress, setProgress] = usePersistentState("vision2voice.live.progress.v1", 0);
   const [liveClock, setLiveClock] = usePersistentState("vision2voice.live.clock.v1", "—");
+  const [alignmentMode, setAlignmentMode] = usePersistentState("vision2voice.live.alignmentMode.v1", "auto");
   const [busy, setBusy] = useState(false);
   const [startPhase, setStartPhase] = useState<StartPhase>("idle");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const eventSourceRef = useRef<EventSource | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const lastPlaybackSyncAtRef = useRef(0);
   const handleStreamEventRef = useRef<(event: LiveStreamEvent) => void>(() => undefined);
 
   useEffect(() => {
@@ -207,10 +222,9 @@ const LiveReplay = () => {
     }
   }, []);
   const canStart = Boolean(
-    gameId.trim() &&
-      (mode === "youtube"
-        ? youtubeVideoId
-        : startClock.trim() && (mode === "url" ? videoUrl.trim() : videoFile)),
+    mode === "youtube"
+      ? gameId.trim() && youtubeVideoId
+      : mode === "url" ? videoUrl.trim() : videoFile,
   );
 
   const isRunning = status === "running";
@@ -280,6 +294,8 @@ const LiveReplay = () => {
     setCaptions([]);
     setWarnings([]);
     setProgress(0);
+    setAlignmentMode("auto");
+    setLiveClock("—");
     setStatus("preparing");
     setStartPhase(mode === "upload" ? "uploading" : "creating_session");
     setYoutubeEmbedError(null);
@@ -298,9 +314,7 @@ const LiveReplay = () => {
       setVideoCurrentTime(0);
 
       const session = await startLiveSession({
-        nba_game_id: gameId.trim(),
-        start_period: Number(startPeriod) || 1,
-        start_clock: startClock.trim() || "12:00",
+        ...(gameId.trim() ? { nba_game_id: gameId.trim() } : {}),
         cadence_sec: 1,
         window_sec: 2,
         include_knowledge: includeKnowledge,
@@ -336,6 +350,9 @@ const LiveReplay = () => {
   };
 
   const handleStreamEvent = (event: LiveStreamEvent) => {
+    if (typeof event.alignment_mode === "string") {
+      setAlignmentMode(event.alignment_mode);
+    }
     if (event.type === "caption") {
       setStartPhase("ready");
       setCaptions((current) => [event, ...current].slice(0, 40));
@@ -357,7 +374,7 @@ const LiveReplay = () => {
     }
     if (event.type === "tick") {
       setStartPhase("ready");
-      setLiveClock(`Q${event.period} ${event.clock}`);
+      setLiveClock(formatLiveClock(event.period, event.clock));
       setProgress(event.duration_sec ? Math.min(100, (event.replay_time_sec / event.duration_sec) * 100) : 0);
       if (typeof event.event_count === "number") setEventCount(event.event_count);
       return;
@@ -378,15 +395,36 @@ const LiveReplay = () => {
     }
     if (event.type === "status" || event.type === "complete" || event.type === "stopped") {
       setStatus(String(event.status || event.type));
+      if (typeof event.warning === "string") {
+        setWarnings((current) => (current.includes(event.warning as string) ? current : [...current, event.warning as string]));
+      }
+      const detected = event.clock_detection as { period?: number; clock?: string } | undefined;
+      if (detected?.period && detected.clock) {
+        setAlignmentMode("scorebug_replay");
+        setLiveClock(formatLiveClock(detected.period, detected.clock));
+      } else if (event.alignment_mode === "highlight_clip" && typeof event.replay_time_sec === "number") {
+        setLiveClock(formatLiveClock(0, `CLIP ${formatClipClock(event.replay_time_sec)}`));
+      }
       if (event.type === "complete" || event.type === "stopped") setStartPhase("idle");
       else if (event.status === "running" || event.status === "paused" || event.status === "ready") setStartPhase("ready");
       if (event.type === "complete" || event.type === "stopped") eventSourceRef.current?.close();
       return;
     }
     if (event.type === "error") {
+      const message = String(event.error || "Live replay failed");
+      if (/unknown live session/i.test(message)) {
+        eventSourceRef.current?.close();
+        clearSessionId();
+        setStatus("idle");
+        setStartPhase("idle");
+        setStreamError("Previous live session expired. Start a new replay.");
+        setLiveClock("—");
+        setProgress(0);
+        return;
+      }
       setStatus("error");
       setStartPhase("error");
-      setStreamError(String(event.error || "Live replay failed"));
+      setStreamError(message);
       eventSourceRef.current?.close();
     }
   };
@@ -468,6 +506,7 @@ const LiveReplay = () => {
     setEventCount(0);
     setProgress(0);
     setLiveClock("—");
+    setAlignmentMode("auto");
     setGameResults([]);
     clearSelectedGame();
     setYoutubeEmbedError(null);
@@ -481,12 +520,15 @@ const LiveReplay = () => {
       const video = videoRef.current;
       const replayTime = Number.isFinite(video?.currentTime) ? video?.currentTime || 0 : 0;
       const playbackRate = Number.isFinite(video?.playbackRate) ? video?.playbackRate || 1 : 1;
+      const duration = Number.isFinite(video?.duration) && (video?.duration || 0) > 0 ? video?.duration : undefined;
       setVideoCurrentTime(replayTime);
+      lastPlaybackSyncAtRef.current = Date.now();
       try {
         await updateLivePlayback(sessionId, {
           state,
           replay_time_sec: replayTime,
           playback_rate: playbackRate,
+          ...(duration ? { duration_sec: duration } : {}),
         });
       } catch (e) {
         const message = e instanceof Error ? e.message : "Playback sync failed";
@@ -538,7 +580,16 @@ const LiveReplay = () => {
   };
 
   const handleVideoTimeUpdate = () => {
-    setVideoCurrentTime(videoRef.current?.currentTime || 0);
+    const video = videoRef.current;
+    setVideoCurrentTime(video?.currentTime || 0);
+    if (!video || video.paused || video.ended) return;
+    const now = Date.now();
+    if (now - lastPlaybackSyncAtRef.current < 900) return;
+    void sendPlaybackControl("playing");
+  };
+
+  const handleVideoClockHold = () => {
+    void sendPlaybackControl("paused");
   };
 
   const handleYouTubeBlocked = useCallback((code: number) => {
@@ -557,11 +608,18 @@ const LiveReplay = () => {
     ? `https://www.youtube.com/embed/${activeYouTubeVideoId}?enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&rel=0&modestbranding=1`
     : null;
   const youtubeWatchUrl = activeYouTubeVideoId ? `https://www.youtube.com/watch?v=${activeYouTubeVideoId}` : youtubeUrl.trim();
+  const hasGameId = Boolean(gameId.trim());
+  const alignmentLabel =
+    alignmentMode === "highlight_clip"
+      ? "HIGHLIGHT MODE"
+      : alignmentMode === "scorebug_replay"
+        ? "SCOREBUG SYNC"
+        : "AUTO ALIGNMENT";
   const startButtonLabel =
     startPhase === "uploading"
       ? "UPLOADING…"
       : startPhase === "creating_session"
-        ? "LOADING NBA FEED…"
+        ? hasGameId ? "LOADING NBA FEED…" : "ANALYZING VIDEO…"
         : startPhase === "waiting_for_video"
           ? "PREPARING VIDEO…"
           : mode === "youtube"
@@ -570,7 +628,13 @@ const LiveReplay = () => {
   const statusLabel = startPhase === "waiting_for_video" ? "PREPARING VIDEO" : status.toUpperCase();
   const startStageInfo: Record<"uploading" | "creating_session" | "waiting_for_video", { label: string; hint: string; progress: number }> = {
     uploading: { label: "UPLOADING…", hint: "Sending replay file to backend.", progress: 25 },
-    creating_session: { label: "LOADING NBA FEED…", hint: "Fetching NBA play-by-play and warming the captions engine.", progress: 55 },
+    creating_session: {
+      label: hasGameId ? "LOADING NBA FEED…" : "ANALYZING VIDEO…",
+      hint: hasGameId
+        ? "Fetching NBA play-by-play and warming the captions engine."
+        : "Preparing media-time captions for this clip.",
+      progress: 55,
+    },
     waiting_for_video: { label: "PREPARING VIDEO…", hint: "Waiting for the first stream event.", progress: 80 },
   };
   const showStartStage =
@@ -847,9 +911,9 @@ const LiveReplay = () => {
 
                 <div className="space-y-6">
                   <div>
-                    <Marker tone="muted">MANUAL ENTRY</Marker>
+                    <Marker tone="muted">GAME FEED</Marker>
                     <div className="mt-3 space-y-1">
-                      <Label htmlFor="game-id">NBA game id</Label>
+                      <Label htmlFor="game-id">NBA game id {mode === "youtube" ? "" : "(optional)"}</Label>
                       <Input
                         id="game-id"
                         value={gameId}
@@ -868,27 +932,12 @@ const LiveReplay = () => {
                   </div>
 
                   <div>
-                    <Marker tone="muted">SCHEDULE</Marker>
-                    <div className="mt-3 grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="period">Start period</Label>
-                        <Input
-                          id="period"
-                          value={startPeriod}
-                          onChange={(e) => setStartPeriod(e.target.value)}
-                          inputMode="numeric"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label htmlFor="clock">Start clock</Label>
-                        <Input
-                          id="clock"
-                          value={startClock}
-                          onChange={(e) => setStartClock(e.target.value)}
-                          placeholder="12:00"
-                        />
-                      </div>
-                    </div>
+                    <Marker tone={alignmentMode === "highlight_clip" ? "accent" : "muted"}>{alignmentLabel}</Marker>
+                    <p className="mt-3 font-mono text-[10px] uppercase tracked text-foreground/45">
+                      {alignmentMode === "highlight_clip"
+                        ? "MEDIA TIME · VISION CAPTIONS"
+                        : "OPENING FRAME SCOREBUG · QUARTER/CLOCK"}
+                    </p>
                   </div>
 
                   <label className="flex items-center gap-3 border border-foreground/25 px-3 py-2 font-mono text-[10px] uppercase tracked text-foreground/60">
@@ -937,7 +986,7 @@ const LiveReplay = () => {
                       <p className="mt-3 font-mono text-[10px] uppercase tracked text-foreground/45">
                         {mode === "youtube"
                           ? "— REQUIRES YOUTUBE URL AND GAME ID —"
-                          : "— REQUIRES SOURCE, GAME ID, AND START CLOCK —"}
+                          : "— REQUIRES VIDEO SOURCE —"}
                       </p>
                     )}
                   </div>
@@ -968,6 +1017,9 @@ const LiveReplay = () => {
                 </span>
                 <span className="text-foreground">{teamMatchup}</span>
                 <span className="text-foreground/55">{liveClock}</span>
+                {activeSourceType === "replay_file" && (
+                  <span className="text-foreground/55">{alignmentLabel}</span>
+                )}
                 <span className="text-foreground/55">SESSION {shortSession}</span>
                 <span className="text-foreground/55">{String(eventCount).padStart(4, "0")} EVENTS</span>
                 <span className="ml-auto flex items-center gap-2">
@@ -1077,6 +1129,9 @@ const LiveReplay = () => {
                         onSeeked={handleVideoSeeked}
                         onRateChange={handleVideoRateChange}
                         onTimeUpdate={handleVideoTimeUpdate}
+                        onWaiting={handleVideoClockHold}
+                        onStalled={handleVideoClockHold}
+                        onEnded={handleVideoClockHold}
                         className="absolute inset-0 h-full w-full object-contain"
                       />
                     ) : (
@@ -1093,7 +1148,7 @@ const LiveReplay = () => {
                       <Metric label="GAME CLOCK" value={liveClock} accent={isRunning} />
                       <Metric label="LATENCY" value={formatLatency(latestCaption?.latency_ms) || "—"} />
                       <Metric label="SOURCE" value={(latestCaption?.source && sourceLabel[latestCaption.source]) || "—"} />
-                      <Metric label="EVENTS" value={String(eventCount).padStart(4, "0")} />
+                      <Metric label="ALIGN" value={activeSourceType === "replay_file" ? alignmentLabel : String(eventCount).padStart(4, "0")} />
                     </div>
                     <div className="mt-3 flex items-center gap-3">
                       <span className="shrink-0 font-mono text-[10px] uppercase tracked text-foreground/55">PROGRESS</span>
@@ -1134,7 +1189,7 @@ const LiveReplay = () => {
                       </span>
                       <span className="font-mono text-[10px] uppercase tracked tabular text-foreground/45">
                         {String(visibleCaptions.length).padStart(2, "0")} LINES ·{" "}
-                        {activeSourceType === "youtube_embed" ? "FEED LIVE" : "1S CADENCE"}
+                        {activeSourceType === "youtube_embed" ? "FEED LIVE" : alignmentLabel}
                       </span>
                     </div>
                     <Button
@@ -1176,7 +1231,7 @@ const LiveReplay = () => {
                               <span className="text-foreground tabular">
                                 {formatReplayTime(caption.replay_time_sec)}
                                 <span className="ml-2 text-foreground/45">
-                                  Q{caption.period} · {caption.clock}
+                                  {formatCaptionClock(caption)}
                                 </span>
                               </span>
                               <span className="text-foreground/55">

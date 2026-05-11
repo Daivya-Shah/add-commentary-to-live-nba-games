@@ -62,7 +62,7 @@ describe("live utilities", () => {
     });
   });
 
-  it("throws when stopping a live session fails", async () => {
+  it("treats already-expired live sessions as stopped", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
     global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toBe("http://127.0.0.1:8000/live/sessions/missing/stop");
@@ -73,7 +73,7 @@ describe("live utilities", () => {
       });
     }) as typeof fetch;
 
-    await expect(stopLiveSession("missing")).rejects.toThrow("Live session not found");
+    await expect(stopLiveSession("missing")).resolves.toBeUndefined();
   });
 
   it("searches live games with a client-side timeout signal", async () => {

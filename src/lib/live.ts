@@ -2,14 +2,14 @@ import { getBackendBaseUrl } from "@/lib/analysis";
 
 export interface LiveSessionRequest {
   file_url?: string;
-  nba_game_id: string;
-  start_period: number;
-  start_clock: string;
+  nba_game_id?: string;
+  start_period?: number;
+  start_clock?: string;
   cadence_sec?: number;
   window_sec?: number;
   replay_speed?: number;
   clock_mode?: "replay_media" | "feed_live" | string;
-  source_type?: "replay_file" | "youtube_embed";
+  source_type?: "replay_file" | "youtube_embed" | "youtube_watch";
   youtube_url?: string;
   youtube_video_id?: string;
   demo_feed_events?: boolean;
@@ -19,7 +19,7 @@ export interface LiveSessionRequest {
 export interface LiveSessionResponse {
   session_id: string;
   status: string;
-  source_type?: "replay_file" | "youtube_embed" | string;
+  source_type?: "replay_file" | "youtube_embed" | "youtube_watch" | string;
   team_names: string[];
   event_count: number;
   warnings: string[];
@@ -102,12 +102,14 @@ export interface LiveTickEvent {
   event_count?: number;
   playback_rate?: number;
   clock_mode?: string;
+  alignment_mode?: string;
 }
 
 export interface LivePlaybackControlRequest {
   state: "playing" | "paused";
   replay_time_sec: number;
   playback_rate: number;
+  duration_sec?: number;
 }
 
 export type LiveStreamEvent =
@@ -261,6 +263,7 @@ export async function stopLiveSession(sessionId: string): Promise<void> {
   if (!res.ok) {
     const data = await res.json().catch(() => null);
     const detail = data && typeof data.detail === "string" ? data.detail : `Stop session failed (${res.status})`;
+    if (res.status === 404 && /live session not found/i.test(detail)) return;
     throw new Error(detail);
   }
 }
