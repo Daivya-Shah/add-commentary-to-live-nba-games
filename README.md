@@ -224,9 +224,3 @@ npm run dev:backend  # API only (expects backend/.venv)
 - Enrich or replace `knowledge.json` with live stats (e.g. more `nba_api` endpoints) — wire into `retrieve_context` and optionally into timeline prompts.  
 - Add evaluation metrics (BLEU/ROUGE) against reference commentaries.  
 - Tighter latency: smaller models, fewer frames, caching, or async queue.
-
----
-
-## License
-
-Use and attribution should follow your course, team, or employer policy for data, APIs, and third-party content.
