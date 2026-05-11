@@ -32,14 +32,13 @@ The `/live` screen supports two live-caption modes and requires direct FastAPI m
 
 | Input | Meaning |
 | --- | --- |
-| `source_type` | `replay_file` or `youtube_embed`. Defaults to `replay_file`. |
+| `source_type` | `replay_file`, `youtube_embed`, or `youtube_watch`. Defaults to `replay_file`. |
 | `file_url` | Replay File video URL the backend can download. Local upload mode creates this URL through `/live/uploads`. |
-| `youtube_url` | YouTube watch/embed/live URL for YouTube Feed-Live mode. |
-| `youtube_video_id` | Normalized YouTube video ID for embedding. |
+| `youtube_url` | YouTube watch/embed/live URL for YouTube sessions. |
+| `youtube_video_id` | Normalized YouTube video ID for embedding or watch-page extension sessions. |
 | `demo_feed_events` | Dev/test-only feed-live demo captions when `LIVE_FEED_DEMO_ENABLED=1`. |
 | `nba_game_id` | NBA game ID used to load play-by-play and rosters. |
-| `start_period` | Period where the replay begins. |
-| `start_clock` | Game clock at replay start, for example `11:36`. |
+| `start_period` / `start_clock` | Optional compatibility fallback. Replay File sessions auto-detect these from the opening scorebug when vision is configured. |
 | `cadence_sec` | How often the replay loop emits ticks and evaluates captions. |
 | `window_sec` | Visual observation window size. |
 | `replay_speed` | Playback speed for the backend replay loop. |
@@ -75,6 +74,14 @@ The `/live` screen supports two live-caption modes and requires direct FastAPI m
 
 Completed games may show an empty feed-live caption panel because existing events are seeded as already seen. In local development, enable demo feed events to verify the visible caption path without waiting for an in-progress game.
 
+### YouTube Watch Extension
+
+1. The Chrome extension creates a session with `source_type: "youtube_watch"`.
+2. Live streams use `clock_mode: "feed_live"` and follow the same feed polling behavior as YouTube Feed-Live.
+3. Recorded videos use `clock_mode: "replay_media"` and send YouTube player time, playback rate, and optional duration through `/live/sessions/{session_id}/playback`.
+4. The backend aligns player time to the replay clock fallback and emits feed captions when the playback window crosses official play-by-play events.
+5. The backend never downloads or samples YouTube watch-page media.
+
 In Replay File mode, pausing the video sends `state: "paused"` to the backend, which stops ticks and caption generation. Seeking sends the new video `currentTime`, and the backend emits a tick for the corresponding game clock before continuing. YouTube Feed-Live mode is driven by NBA feed polling, so YouTube player controls do not drive the backend clock.
 
 ## Feed and Vision Reconciliation
@@ -87,7 +94,7 @@ Live Replay prioritizes structured game data:
 - Already elapsed feed context can produce `feed_context_with_vision` captions.
 - Vision observations can support captions when `LIVE_VISION_ENABLED=1`.
 - Vision-only behavior should be cautious because official play-by-play is the source of truth.
-- YouTube Feed-Live never emits vision captions because embedded YouTube media does not expose raw frames to the app.
+- YouTube Feed-Live and YouTube Watch never emit vision captions because YouTube media does not expose raw frames to the app/backend.
 
 Live captions also extract action detail from official play-by-play descriptions when available, such as driving layups, step-back threes, pull-up jumpers, alley-oops, tip-ins, rebounds, screens, help defense, or reset spacing. Replay File sessions can blend those feed cues with compact visual observations of player movement and coverage. YouTube Feed-Live captions are limited to official feed wording because the backend cannot inspect embedded YouTube video frames.
 
@@ -130,11 +137,12 @@ with:
 {
   "state": "playing",
   "replay_time_sec": 24.2,
-  "playback_rate": 1
+  "playback_rate": 1,
+  "duration_sec": 1800
 }
 ```
 
-Use `playing` to advance Replay File captions and `paused` to hold them at the current replay position.
+Use `playing` to advance Replay File or recorded YouTube Watch captions and `paused` to hold them at the current replay position. `duration_sec` is optional and used by YouTube Watch sessions to clamp player time without downloading media.
 
 ## Local Upload Mode
 
@@ -172,7 +180,7 @@ The backend resolves team names/abbreviations, calls NBA game finder APIs, norma
 ## Operational Limits
 
 - stats.nba.com access can be rate-limited or blocked by network conditions.
-- Replay alignment is only as good as the chosen start period and clock.
+- Replay File alignment depends on a visible scorebug in the opening frames; without vision or a readable scorebug, the backend falls back to Q1 12:00 compatibility defaults.
 - Local upload files are temporary and should not be treated as durable storage.
 - SSE streams are in-memory per backend process.
 - Multiple backend instances need external session coordination before Live Replay can scale horizontally.

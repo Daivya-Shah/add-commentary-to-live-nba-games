@@ -197,7 +197,7 @@ npm run dev:backend  # API only (expects backend/.venv)
 | `POST` | `/analyze` | Body: `{ "clip_id", "file_url" }` — full pipeline |
 | `POST` | `/regenerate` | Uses latest stored detection from Supabase when available; otherwise re-analyzes |
 | `POST` | `/export-commentary-video` | Body: `file_url`, `commentary_text`, optional `possession_timeline` + `segment_commentary_lines` for segment-aligned audio |
-| `POST` | `/live/sessions` | Starts a simulated-live replay session from a video URL + NBA game id + start clock |
+| `POST` | `/live/sessions` | Starts a simulated-live replay session from a video URL + NBA game id; replay files auto-detect the opening scorebug clock |
 | `GET` | `/live/sessions/{session_id}/events` | Server-Sent Events stream for live status, ticks, captions, warnings, and completion |
 | `POST` | `/live/sessions/{session_id}/stop` | Stops an active live replay session |
 

@@ -27,7 +27,7 @@ Used by `backend/main.py`.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | For real AI behavior | Enables vision, text commentary, summary alignment, live vision captions, and TTS. Without it, analysis falls back to templates and voiceover export is unavailable. |
-| `OPENAI_VISION_MODEL` | No | Vision model for clip analysis. Default: `gpt-4o-mini`. |
+| `OPENAI_VISION_MODEL` | No | Vision model for clip analysis. Default: `gpt-5-mini`. |
 | `OPENAI_VISION_IMAGE_DETAIL` | No | Image detail for OpenAI vision calls: `low`, `high`, or `auto`. Default: `high`. |
 | `OPENAI_TEXT_MODEL` | No | Text model for offline commentary and summary alignment. Default: `gpt-4o-mini`. |
 | `OPENAI_LIVE_TEXT_MODEL` | No | Text model for Live Replay caption enrichment. Default: `gpt-5.4-nano`. |
@@ -36,6 +36,9 @@ Used by `backend/main.py`.
 | `FRAME_SAMPLE_COUNT` | No | Number of frames sampled from clips. Default: `16`. |
 | `NBA_ROSTER_LOOKUP` | No | Set `0` to disable jersey-to-player roster enrichment. Default: enabled. |
 | `NBA_TEAM_HINT_MIN_SCORE` | No | Minimum fuzzy score for team hint matching. Default from example: `35`. |
+| `LIVE_CLOCK_AUTO_DETECT` | No | Set `0` to disable Replay File opening scorebug clock detection. Default: enabled. |
+| `LIVE_CLOCK_DETECT_MIN_CONFIDENCE` | No | Minimum vision confidence for accepting detected period/clock. Default: `0.45`. |
+| `LIVE_CLOCK_DETECT_TIMEOUT_SEC` | No | Timeout for opening scorebug clock detection. Default: `8`. |
 | `LIVE_VISION_ENABLED` | No | Set `0` to skip OpenAI calls in the live replay hot path. Default from example: enabled. |
 | `VOICEOVER_PLAYBACK_SPEED` | No | Audio slot/speed factor for voiceover fitting. Default: `1.5`. |
 | `SUPABASE_URL` | Optional | Backend Supabase project URL for server-side persistence. |
@@ -49,7 +52,7 @@ Example:
 
 ```bash
 OPENAI_API_KEY=...
-OPENAI_VISION_MODEL=gpt-4o-mini
+OPENAI_VISION_MODEL=gpt-5-mini
 OPENAI_VISION_IMAGE_DETAIL=high
 OPENAI_TEXT_MODEL=gpt-4o-mini
 OPENAI_LIVE_TEXT_MODEL=gpt-5.4-nano

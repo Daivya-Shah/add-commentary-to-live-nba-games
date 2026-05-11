@@ -13,6 +13,7 @@ This directory is the maintainer-facing documentation for Vision2Voice. It separ
 | [API Reference](./api-reference.md) | FastAPI endpoint contracts, request bodies, response shapes, errors, and SSE event types. |
 | [Supabase Data Model](./supabase-data-model.md) | Tables, storage bucket, Edge Function behavior, persistence rules, and RLS posture. |
 | [Live Replay](./live-replay.md) | How the simulated-live workflow works, required inputs, event reconciliation, and operational limits. |
+| [Browser Extension](./browser-extension.md) | Chrome extension build, local loading, YouTube setup, and limitations. |
 | [Deployment](./deployment.md) | Production deployment patterns for the frontend, backend, Supabase Edge Function, and secrets. |
 | [Troubleshooting](./troubleshooting.md) | Common failure modes and concrete checks. |
 

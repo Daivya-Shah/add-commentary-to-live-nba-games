@@ -119,6 +119,8 @@ The backend:
 
 YouTube Feed-Live uses the same `/live/sessions` and SSE surface with `source_type: "youtube_embed"` and `clock_mode: "feed_live"`. The browser embeds YouTube with `enablejsapi=1`; the backend never downloads or samples the YouTube media. Captions are emitted only for newly observed NBA play-by-play events from polling the feed.
 
+The Chrome extension uses `source_type: "youtube_watch"` from the real YouTube watch page. Live streams use `clock_mode: "feed_live"`. Recorded videos use `clock_mode: "replay_media"` and send player time through `/live/sessions/{session_id}/playback`; replay-file sessions auto-detect the opening scorebug clock, while YouTube watch sessions use the backend replay clock fallback because the backend does not download YouTube media.
+
 ## Source of Truth Rules
 
 - For standard clip analysis, vision output is the primary structured source.

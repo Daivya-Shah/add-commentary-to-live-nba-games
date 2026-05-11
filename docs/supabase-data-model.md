@@ -90,7 +90,7 @@ Stores live caption session metadata.
 | --- | --- | --- |
 | `id` | UUID | Primary key. |
 | `file_url` | TEXT | Replay source URL; nullable for YouTube Feed-Live sessions. |
-| `source_type` | TEXT | `replay_file` or `youtube_embed`. |
+| `source_type` | TEXT | `replay_file`, `youtube_embed`, or `youtube_watch`. |
 | `source_url` | TEXT | Original replay or YouTube source URL. |
 | `youtube_video_id` | TEXT | Normalized YouTube video ID when applicable. |
 | `nba_game_id` | TEXT | NBA game ID used for play-by-play lookup. |

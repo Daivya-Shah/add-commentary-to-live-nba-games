@@ -243,7 +243,7 @@ Errors:
 
 ### `POST /live/sessions`
 
-Starts a live caption session. Replay sessions use a backend-readable video file; YouTube sessions embed the player in the browser and generate captions from NBA feed events only.
+Starts a live caption session. Replay sessions use a backend-readable video file; web-app YouTube sessions embed the player in the browser and generate captions from NBA feed events only. Extension YouTube watch sessions run directly on YouTube pages and use either feed-live polling or browser-supplied player time.
 
 Request:
 
@@ -252,8 +252,6 @@ Request:
   "source_type": "replay_file",
   "file_url": "https://example.com/replay.mp4",
   "nba_game_id": "0022300157",
-  "start_period": 1,
-  "start_clock": "12:00",
   "cadence_sec": 1,
   "window_sec": 2,
   "replay_speed": 1,
@@ -270,8 +268,6 @@ YouTube Feed-Live request:
   "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "youtube_video_id": "dQw4w9WgXcQ",
   "nba_game_id": "0022300157",
-  "start_period": 1,
-  "start_clock": "12:00",
   "cadence_sec": 1,
   "window_sec": 2,
   "clock_mode": "feed_live",
@@ -280,15 +276,30 @@ YouTube Feed-Live request:
 }
 ```
 
+YouTube watch-page extension request:
+
+```json
+{
+  "source_type": "youtube_watch",
+  "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "youtube_video_id": "dQw4w9WgXcQ",
+  "nba_game_id": "0022300157",
+  "cadence_sec": 1,
+  "window_sec": 2,
+  "clock_mode": "replay_media",
+  "include_knowledge": false
+}
+```
+
 Field constraints:
 
 | Field | Constraint |
 | --- | --- |
-| `source_type` | `replay_file` or `youtube_embed`. Defaults to `replay_file`. |
+| `source_type` | `replay_file`, `youtube_embed`, or `youtube_watch`. Defaults to `replay_file`. |
 | `file_url` | Required for `replay_file`; omitted for `youtube_embed`. |
-| `youtube_url` / `youtube_video_id` | At least one required for `youtube_embed`. |
+| `youtube_url` / `youtube_video_id` | At least one required for YouTube sessions. |
 | `demo_feed_events` | Dev/test-only; backend honors it only when `LIVE_FEED_DEMO_ENABLED=1`. |
-| `start_period` | `1..10` |
+| `start_period` / `start_clock` | Optional compatibility fallback. Replay File sessions auto-detect these from the opening scorebug when vision is configured. |
 | `cadence_sec` | `1.0..10.0` |
 | `window_sec` | `2.0..20.0` |
 | `replay_speed` | `0.25..8.0` |
@@ -387,7 +398,7 @@ For a `caption_update`, `type` is `caption_update`, `caption_stage` is `enriched
 
 ### `POST /live/sessions/{session_id}/playback`
 
-Updates the replay media clock. The frontend calls this from the video element's play, pause, seek, and playback-rate events.
+Updates the replay media clock. The frontend or extension calls this from the video element's play, pause, seek, and playback-rate events.
 
 Request:
 
@@ -395,7 +406,8 @@ Request:
 {
   "state": "playing",
   "replay_time_sec": 24.2,
-  "playback_rate": 1
+  "playback_rate": 1,
+  "duration_sec": 1800
 }
 ```
 
@@ -405,6 +417,7 @@ Behavior:
 - `paused` changes session status to `paused`; ticks and captions stop advancing.
 - Seeking sends the new `replay_time_sec`; the backend emits a `tick` for the aligned game clock.
 - `replay_time_sec` is clamped to the replay duration once the backend has probed the video.
+- `duration_sec` is optional and lets YouTube watch sessions clamp player time without downloading media.
 
 Response:
 
@@ -418,14 +431,10 @@ Errors:
 
 ### `POST /live/sessions/{session_id}/stop`
 
-Requests a session stop.
+Requests a session stop. This endpoint is idempotent; already-expired in-memory sessions are treated as stopped so browser cleanup after backend reloads does not fail.
 
 Response:
 
 ```json
 { "status": "stopping" }
 ```
-
-Errors:
-
-- `404` when the session does not exist.
