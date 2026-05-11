@@ -9,6 +9,7 @@
     "dev:full": "concurrently -n web,api -c cyan,magenta \"npm run dev\" \"npm run dev:backend\"",
     "build": "vite build",
     "build:dev": "vite build --mode development",
+    "build:extension": "vite build --config vite.extension.config.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
