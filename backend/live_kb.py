@@ -24,12 +24,15 @@ class PregameKnowledgeBase:
         return facts[:limit]
 
 
-def build_pregame_kb(package: LiveGamePackage) -> PregameKnowledgeBase:
+def build_pregame_kb(package: LiveGamePackage, *, include_knowledge: bool = True) -> PregameKnowledgeBase:
     kb = PregameKnowledgeBase(
         game_id=package.game_id,
         team_names=[t.name for t in package.teams],
         warnings=list(package.warnings),
     )
+
+    if not include_knowledge:
+        return kb
 
     for team in package.teams:
         facts = [f"{team.name} is one of the teams in this game."]

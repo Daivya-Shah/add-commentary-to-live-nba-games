@@ -23,12 +23,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
 from jersey_resolve import enrich_timeline_segments, enrich_vision_with_nba_rosters
 from live_game_data import nba_team_options, search_nba_games
-from live_sessions import LiveSessionConfig, LiveSessionManager
+from live_sessions import LiveSessionConfig, LiveSessionManager, vision_chat_completion_kwargs
 from openai_retry import with_openai_retry
 from timeline import (
     commentary_lines_for_timeline,
@@ -89,25 +89,47 @@ class VoiceoverExportBody(BaseModel):
 
 
 class LiveSessionRequest(BaseModel):
-    file_url: str
-    nba_game_id: str
+    file_url: str | None = None
+    nba_game_id: str = ""
     start_period: int = Field(default=1, ge=1, le=10)
     start_clock: str = "12:00"
-    cadence_sec: float = Field(default=3.0, ge=1.0, le=10.0)
-    window_sec: float = Field(default=6.0, ge=2.0, le=20.0)
+    cadence_sec: float = Field(default=1.0, ge=1.0, le=10.0)
+    window_sec: float = Field(default=2.0, ge=2.0, le=20.0)
     replay_speed: float = Field(default=1.0, ge=0.25, le=8.0)
     clock_mode: str = "replay_media"
+    source_type: str = Field(default="replay_file", pattern="^(replay_file|youtube_embed|youtube_watch)$")
+    youtube_url: str | None = None
+    youtube_video_id: str | None = None
+    demo_feed_events: bool = False
+    include_knowledge: bool = False
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "LiveSessionRequest":
+        if self.source_type == "replay_file" and not (self.file_url or "").strip():
+            raise ValueError("file_url is required for replay_file live sessions.")
+        if self.source_type in {"youtube_embed", "youtube_watch"}:
+            if not ((self.youtube_video_id or "").strip() or (self.youtube_url or "").strip()):
+                raise ValueError("youtube_url or youtube_video_id is required for YouTube live sessions.")
+            if not self.nba_game_id.strip():
+                raise ValueError("nba_game_id is required for YouTube live sessions.")
+            if self.source_type == "youtube_embed" and self.clock_mode == "replay_media":
+                self.clock_mode = "feed_live"
+        if self.clock_mode not in {"replay_media", "feed_live"}:
+            raise ValueError("clock_mode must be replay_media or feed_live.")
+        return self
 
 
 class LivePlaybackControlRequest(BaseModel):
     state: str = Field(pattern="^(playing|paused)$")
     replay_time_sec: float = Field(default=0.0, ge=0.0)
     playback_rate: float = Field(default=1.0, ge=0.1, le=8.0)
+    duration_sec: float | None = Field(default=None, ge=0.1)
 
 
 class LiveSessionResponse(BaseModel):
     session_id: str
     status: str
+    source_type: str = "replay_file"
     team_names: list[str] = Field(default_factory=list)
     event_count: int = 0
     warnings: list[str] = Field(default_factory=list)
@@ -312,10 +334,9 @@ async def vision_with_openai(frames: list[bytes]) -> dict[str, Any]:
 
     async def _vision_call():
         return await client.chat.completions.create(
-            model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": content}],
             response_format={"type": "json_object"},
-            max_tokens=1600,
+            **vision_chat_completion_kwargs(max_tokens=1600),
         )
 
     resp = await with_openai_retry(_vision_call, label="vision")
@@ -568,60 +589,87 @@ async def persist_live_event_to_supabase(session_id: str, event: dict[str, Any])
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             if event_type == "session_ready":
-                await client.post(
+                response = await client.post(
                     f"{base}/rest/v1/live_sessions",
                     headers=headers,
                     json={
                         "id": session_id,
                         "file_url": event.get("file_url"),
+                        "source_type": event.get("source_type") or "replay_file",
+                        "source_url": event.get("source_url") or event.get("file_url"),
+                        "youtube_video_id": event.get("youtube_video_id"),
                         "nba_game_id": event.get("game_id"),
                         "start_period": event.get("start_period"),
                         "start_clock": event.get("start_clock"),
                         "cadence_sec": event.get("cadence_sec"),
                         "window_sec": event.get("window_sec"),
+                        "clock_mode": event.get("clock_mode") or "replay_media",
                         "status": event.get("status"),
                         "warnings_json": event.get("warnings") or [],
                     },
                 )
-            elif event_type == "caption":
-                await client.post(
+                log_live_persist_failure(response, event_type)
+            elif event_type in {"caption", "caption_update"}:
+                caption_payload = {
+                    "session_id": session_id,
+                    "event_id": event.get("event_id"),
+                    "period": event.get("period"),
+                    "game_clock": event.get("clock"),
+                    "event_type": event.get("event_type"),
+                    "player_name": event.get("player_name"),
+                    "team_name": event.get("team_name"),
+                    "score": event.get("score"),
+                    "caption_text": event.get("text"),
+                    "source": event.get("source"),
+                    "confidence": event.get("confidence"),
+                    "latency_ms": event.get("latency_ms"),
+                    "model_name": event.get("model_name"),
+                    "feed_description": event.get("feed_description"),
+                    "visual_summary": event.get("visual_summary"),
+                    "feed_context_json": event.get("feed_context"),
+                    "caption_stage": event.get("caption_stage") or "initial",
+                    "enriched_from_event_id": event.get("enriched_from_event_id"),
+                }
+                if event.get("generated_at"):
+                    caption_payload["generated_at"] = event.get("generated_at")
+                response = await client.post(
                     f"{base}/rest/v1/live_captions",
                     headers=headers,
-                    json={
-                        "session_id": session_id,
-                        "event_id": event.get("event_id"),
-                        "period": event.get("period"),
-                        "game_clock": event.get("clock"),
-                        "event_type": event.get("event_type"),
-                        "player_name": event.get("player_name"),
-                        "team_name": event.get("team_name"),
-                        "score": event.get("score"),
-                        "caption_text": event.get("text"),
-                        "source": event.get("source"),
-                        "confidence": event.get("confidence"),
-                        "latency_ms": event.get("latency_ms"),
-                        "model_name": event.get("model_name"),
-                        "feed_description": event.get("feed_description"),
-                        "visual_summary": event.get("visual_summary"),
-                        "feed_context_json": event.get("feed_context"),
-                    },
+                    json=caption_payload,
                 )
+                log_live_persist_failure(response, event_type)
             elif event_type in {"status", "complete", "stopped", "error"}:
                 status = event.get("status") or event_type
                 payload: dict[str, Any] = {"status": status}
                 if event_type in {"complete", "stopped", "error"}:
                     payload["ended_at"] = datetime.now(timezone.utc).isoformat()
-                await client.patch(
+                response = await client.patch(
                     f"{base}/rest/v1/live_sessions",
                     params={"id": f"eq.{session_id}"},
                     headers=headers,
                     json=payload,
                 )
+                log_live_persist_failure(response, event_type)
     except Exception as e:
         logger.warning("Live Supabase persist failed: %s", e)
 
 
+def log_live_persist_failure(response: httpx.Response, event_type: Any) -> None:
+    if response.status_code < 400:
+        return
+    body = response.text.strip()
+    if len(body) > 700:
+        body = f"{body[:700]}…"
+    logger.warning(
+        "Live Supabase persist failed for %s: HTTP %s %s",
+        event_type,
+        response.status_code,
+        body,
+    )
+
+
 live_sessions = LiveSessionManager(event_sink=persist_live_event_to_supabase)
+_live_game_search_cache: dict[tuple[str, str, str, str, int], list[LiveGameSearchResultResponse]] = {}
 
 
 async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> AnalysisResult:
@@ -636,7 +684,7 @@ async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> An
 
     if os.getenv("OPENAI_API_KEY"):
         structured = await vision_with_openai(frames)
-        vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+        vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-5-mini")
     else:
         structured = vision_fallback()
         vision_model = "fallback-vision"
@@ -749,20 +797,60 @@ async def search_live_games(
 ) -> list[LiveGameSearchResultResponse]:
     try:
         capped_limit = max(1, min(limit, 50))
-        results = await asyncio.to_thread(
-            search_nba_games,
-            team=team,
-            opponent=opponent,
-            season=season,
-            season_type=season_type,
-            limit=capped_limit,
+        cache_key = (
+            team.strip().lower(),
+            opponent.strip().lower(),
+            season.strip(),
+            season_type.strip(),
+            capped_limit,
         )
-        return [LiveGameSearchResultResponse(**asdict(result)) for result in results]
+        if cache_key in _live_game_search_cache:
+            return _live_game_search_cache[cache_key]
+
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                search_nba_games,
+                team=team,
+                opponent=opponent,
+                season=season,
+                season_type=season_type,
+                limit=capped_limit,
+                timeout=6,
+            ),
+            timeout=8,
+        )
+        response = [LiveGameSearchResultResponse(**asdict(result)) for result in results]
+        _live_game_search_cache[cache_key] = response
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="NBA game search timed out. Enter the game ID manually or try again.",
+        ) from exc
     except Exception as exc:
+        if is_nba_provider_timeout(exc):
+            logger.warning("Live game search timed out: %s", exc)
+            raise HTTPException(
+                status_code=504,
+                detail="NBA game search timed out. Enter the game ID manually or try again.",
+            ) from exc
         logger.exception("Live game search failed")
         raise HTTPException(status_code=502, detail=f"NBA game search failed: {exc}") from exc
+
+
+def is_nba_provider_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    timeout_markers = (
+        "read timed out",
+        "read timeout",
+        "connect timeout",
+        "connection timed out",
+        "timed out",
+        "timeout",
+    )
+    return "stats.nba.com" in text and any(marker in text for marker in timeout_markers)
 
 
 @app.post("/live/sessions", response_model=LiveSessionResponse)
@@ -770,23 +858,32 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
     try:
         session = await live_sessions.create_session(
             LiveSessionConfig(
-                file_url=body.file_url,
                 nba_game_id=body.nba_game_id,
                 start_period=body.start_period,
                 start_clock=body.start_clock,
+                file_url=body.file_url,
                 cadence_sec=body.cadence_sec,
                 window_sec=body.window_sec,
                 replay_speed=body.replay_speed,
                 clock_mode=body.clock_mode,
+                source_type=body.source_type,
+                youtube_url=body.youtube_url,
+                youtube_video_id=body.youtube_video_id,
+                demo_feed_events=body.demo_feed_events,
+                include_knowledge=body.include_knowledge,
             )
         )
         return LiveSessionResponse(
             session_id=session.session_id,
             status=session.status,
+            source_type=session.config.source_type,
             team_names=session.kb.team_names,
             event_count=len(session.events),
             warnings=session.kb.warnings,
         )
+    except TimeoutError as e:
+        logger.warning("Live session creation timed out: %s", e)
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except Exception as e:
         logger.exception("Live session creation failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -794,8 +891,6 @@ async def create_live_session(body: LiveSessionRequest) -> LiveSessionResponse:
 
 @app.get("/live/sessions/{session_id}/events")
 async def live_session_events(session_id: str) -> StreamingResponse:
-    if not live_sessions.get_session(session_id):
-        raise HTTPException(status_code=404, detail="Live session not found")
     return StreamingResponse(
         live_sessions.event_stream(session_id),
         media_type="text/event-stream",
@@ -817,6 +912,7 @@ async def control_live_session_playback(
         state=body.state,
         replay_time_sec=body.replay_time_sec,
         playback_rate=body.playback_rate,
+        duration_sec=body.duration_sec,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Live session not found")
@@ -827,7 +923,7 @@ async def control_live_session_playback(
 async def stop_live_session(session_id: str) -> dict[str, str]:
     stopped = await live_sessions.stop_session(session_id)
     if not stopped:
-        raise HTTPException(status_code=404, detail="Live session not found")
+        return {"status": "stopped"}
     return {"status": "stopping"}
 
 

@@ -117,10 +117,10 @@ Backend returns `400` for invalid inputs and `502` for NBA lookup failures.
 
 Checks:
 
-- Start period and start clock match the video's first frame.
-- `replay_speed` matches expected backend simulation speed.
+- The opening replay frames show a readable broadcast scorebug.
+- The backend has `OPENAI_API_KEY` configured for scorebug clock detection.
 - The selected `nba_game_id` is the exact game in the replay.
-- The replay clip has not been edited in a way that skips game time without adjusting start clock.
+- The replay clip has not been edited in a way that skips game time after the detected opening clock.
 
 ## Live Replay Stream Disconnects
 

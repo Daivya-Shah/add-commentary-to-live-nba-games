@@ -149,13 +149,16 @@ export type Database = {
       live_captions: {
         Row: {
           caption_text: string
+          caption_stage: string
           confidence: number | null
           created_at: string
+          enriched_from_event_id: string | null
           event_id: string | null
           event_type: string | null
           feed_context_json: Json | null
           feed_description: string | null
           game_clock: string | null
+          generated_at: string | null
           id: string
           latency_ms: number | null
           model_name: string | null
@@ -169,13 +172,16 @@ export type Database = {
         }
         Insert: {
           caption_text: string
+          caption_stage?: string
           confidence?: number | null
           created_at?: string
+          enriched_from_event_id?: string | null
           event_id?: string | null
           event_type?: string | null
           feed_context_json?: Json | null
           feed_description?: string | null
           game_clock?: string | null
+          generated_at?: string | null
           id?: string
           latency_ms?: number | null
           model_name?: string | null
@@ -189,13 +195,16 @@ export type Database = {
         }
         Update: {
           caption_text?: string
+          caption_stage?: string
           confidence?: number | null
           created_at?: string
+          enriched_from_event_id?: string | null
           event_id?: string | null
           event_type?: string | null
           feed_context_json?: Json | null
           feed_description?: string | null
           game_clock?: string | null
+          generated_at?: string | null
           id?: string
           latency_ms?: number | null
           model_name?: string | null
@@ -220,42 +229,54 @@ export type Database = {
       live_sessions: {
         Row: {
           cadence_sec: number
+          clock_mode: string
           created_at: string
           ended_at: string | null
-          file_url: string
+          file_url: string | null
           id: string
           nba_game_id: string
+          source_type: string
+          source_url: string | null
           start_clock: string
           start_period: number
           status: string
           warnings_json: Json
           window_sec: number
+          youtube_video_id: string | null
         }
         Insert: {
           cadence_sec?: number
+          clock_mode?: string
           created_at?: string
           ended_at?: string | null
-          file_url: string
+          file_url?: string | null
           id?: string
           nba_game_id: string
+          source_type?: string
+          source_url?: string | null
           start_clock: string
           start_period: number
           status?: string
           warnings_json?: Json
           window_sec?: number
+          youtube_video_id?: string | null
         }
         Update: {
           cadence_sec?: number
+          clock_mode?: string
           created_at?: string
           ended_at?: string | null
-          file_url?: string
+          file_url?: string | null
           id?: string
           nba_game_id?: string
+          source_type?: string
+          source_url?: string | null
           start_clock?: string
           start_period?: number
           status?: string
           warnings_json?: Json
           window_sec?: number
+          youtube_video_id?: string | null
         }
         Relationships: []
       }

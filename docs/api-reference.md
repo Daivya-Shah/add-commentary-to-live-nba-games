@@ -143,7 +143,7 @@ Errors:
 
 ### `POST /live/uploads?filename={filename}`
 
-Uploads a replay file directly to the local backend temp directory. This avoids Supabase Storage limits during local replay work.
+Uploads a replay file directly to the local backend temp directory. This requires direct FastAPI mode through `VITE_BACKEND_URL` and avoids Supabase Storage limits during local replay work.
 
 Request:
 
@@ -243,20 +243,51 @@ Errors:
 
 ### `POST /live/sessions`
 
-Starts a simulated-live replay session.
+Starts a live caption session. Replay sessions use a backend-readable video file; web-app YouTube sessions embed the player in the browser and generate captions from NBA feed events only. Extension YouTube watch sessions run directly on YouTube pages and use either feed-live polling or browser-supplied player time.
 
 Request:
 
 ```json
 {
+  "source_type": "replay_file",
   "file_url": "https://example.com/replay.mp4",
   "nba_game_id": "0022300157",
-  "start_period": 1,
-  "start_clock": "12:00",
-  "cadence_sec": 3,
-  "window_sec": 6,
+  "cadence_sec": 1,
+  "window_sec": 2,
   "replay_speed": 1,
-  "clock_mode": "replay_media"
+  "clock_mode": "replay_media",
+  "include_knowledge": false
+}
+```
+
+YouTube Feed-Live request:
+
+```json
+{
+  "source_type": "youtube_embed",
+  "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "youtube_video_id": "dQw4w9WgXcQ",
+  "nba_game_id": "0022300157",
+  "cadence_sec": 1,
+  "window_sec": 2,
+  "clock_mode": "feed_live",
+  "demo_feed_events": false,
+  "include_knowledge": false
+}
+```
+
+YouTube watch-page extension request:
+
+```json
+{
+  "source_type": "youtube_watch",
+  "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "youtube_video_id": "dQw4w9WgXcQ",
+  "nba_game_id": "0022300157",
+  "cadence_sec": 1,
+  "window_sec": 2,
+  "clock_mode": "replay_media",
+  "include_knowledge": false
 }
 ```
 
@@ -264,11 +295,16 @@ Field constraints:
 
 | Field | Constraint |
 | --- | --- |
-| `start_period` | `1..10` |
+| `source_type` | `replay_file`, `youtube_embed`, or `youtube_watch`. Defaults to `replay_file`. |
+| `file_url` | Required for `replay_file`; omitted for `youtube_embed`. |
+| `youtube_url` / `youtube_video_id` | At least one required for YouTube sessions. |
+| `demo_feed_events` | Dev/test-only; backend honors it only when `LIVE_FEED_DEMO_ENABLED=1`. |
+| `start_period` / `start_clock` | Optional compatibility fallback. Replay File sessions auto-detect these from the opening scorebug when vision is configured. |
 | `cadence_sec` | `1.0..10.0` |
 | `window_sec` | `2.0..20.0` |
 | `replay_speed` | `0.25..8.0` |
-| `clock_mode` | Defaults to `replay_media` for client-controlled replay playback. |
+| `clock_mode` | `replay_media` for client-controlled replay playback, `feed_live` for YouTube feed polling. |
+| `include_knowledge` | Optional. Defaults to `false`; when `true`, loads extra roster/player/team facts for richer AI captions at the cost of more NBA API work. |
 
 Response:
 
@@ -276,6 +312,7 @@ Response:
 {
   "session_id": "d8d3b9ef-5692-448b-b7a5-5cf606981fa5",
   "status": "running",
+  "source_type": "replay_file",
   "team_names": ["Washington Wizards", "Charlotte Hornets"],
   "event_count": 480,
   "warnings": []
@@ -303,13 +340,14 @@ Event types:
 | `session_ready` | Session metadata is ready. |
 | `status` | Session status changed. |
 | `tick` | Replay time and game clock update. |
-| `caption` | Commentary caption. |
+| `caption` | Immediate feed/template commentary caption. |
+| `caption_update` | Async enriched replacement/addition for a prior caption. |
 | `complete` | Replay finished. |
 | `stopped` | Session stopped by request. |
 | `error` | Session failed. |
 | `ping` | Keepalive. |
 
-`caption` payload:
+`caption` / `caption_update` payload:
 
 ```json
 {
@@ -323,9 +361,9 @@ Event types:
   "team_name": "Test Team",
   "score": "2-0",
   "text": "Generated caption.",
-  "source": "feed_context_with_vision",
+  "source": "feed",
   "confidence": 0.75,
-  "model_name": "gpt-4o-mini",
+  "model_name": "template-live",
   "replay_time_sec": 24,
   "feed_description": "Official play-by-play text.",
   "visual_summary": "Short vision observation.",
@@ -336,9 +374,14 @@ Event types:
     "last_score": "2-0",
     "nearest_prior_event": {}
   },
-  "latency_ms": 125
+  "latency_ms": 125,
+  "caption_stage": "initial",
+  "generated_at": "2026-05-10T19:20:00+00:00",
+  "enriched_from_event_id": null
 }
 ```
+
+For a `caption_update`, `type` is `caption_update`, `caption_stage` is `enriched`, `model_name` is the enrichment model, and `enriched_from_event_id` references the original feed event. The frontend merges updates by `event_id`; persistence appends both rows for review history.
 
 `tick` payload:
 
@@ -355,7 +398,7 @@ Event types:
 
 ### `POST /live/sessions/{session_id}/playback`
 
-Updates the replay media clock. The frontend calls this from the video element's play, pause, seek, and playback-rate events.
+Updates the replay media clock. The frontend or extension calls this from the video element's play, pause, seek, and playback-rate events.
 
 Request:
 
@@ -363,7 +406,8 @@ Request:
 {
   "state": "playing",
   "replay_time_sec": 24.2,
-  "playback_rate": 1
+  "playback_rate": 1,
+  "duration_sec": 1800
 }
 ```
 
@@ -373,6 +417,7 @@ Behavior:
 - `paused` changes session status to `paused`; ticks and captions stop advancing.
 - Seeking sends the new `replay_time_sec`; the backend emits a `tick` for the aligned game clock.
 - `replay_time_sec` is clamped to the replay duration once the backend has probed the video.
+- `duration_sec` is optional and lets YouTube watch sessions clamp player time without downloading media.
 
 Response:
 
@@ -386,14 +431,10 @@ Errors:
 
 ### `POST /live/sessions/{session_id}/stop`
 
-Requests a session stop.
+Requests a session stop. This endpoint is idempotent; already-expired in-memory sessions are treated as stopped so browser cleanup after backend reloads does not fail.
 
 Response:
 
 ```json
 { "status": "stopping" }
 ```
-
-Errors:
-
-- `404` when the session does not exist.

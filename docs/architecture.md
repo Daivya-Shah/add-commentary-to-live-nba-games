@@ -1,15 +1,15 @@
 # Architecture
 
-Vision2Voice is a React/Vite frontend, a Python FastAPI backend, and a Supabase persistence layer. The system has two processing paths for clip analysis and one direct-backend path for Live Replay.
+Vision2Voice is a React/Vite frontend, a Python FastAPI backend, and a Supabase persistence layer. The system has two processing paths for clip analysis and one direct-backend path for Live Replay / YouTube Feed-Live.
 
 ## Components
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
-| Web app | `src/` | Uploads videos, starts analysis, renders results, starts Live Replay sessions, consumes SSE. |
+| Web app | `src/` | Uploads videos, starts analysis, renders results, starts Live Replay or YouTube Feed-Live sessions, consumes SSE. |
 | FastAPI backend | `backend/main.py` | Analysis API, live replay API, OpenAI calls, media processing, Supabase persistence. |
 | Timeline helpers | `backend/timeline.py` | Normalize possession segments and align commentary/visual summary. |
-| Live replay engine | `backend/live_sessions.py`, `backend/live_state.py`, `backend/live_game_data.py` | Load NBA data, align replay clock, reconcile feed and vision, stream captions. |
+| Live engine | `backend/live_sessions.py`, `backend/live_state.py`, `backend/live_game_data.py` | Load NBA data, align replay or feed-live clocks, reconcile feed and optional vision, stream captions. |
 | Voiceover exporter | `backend/voiceover_export.py` | Generate TTS audio and mux it with the source clip using FFmpeg. |
 | Supabase | `supabase/migrations/` | Storage, analysis tables, evaluation tables, live session tables. |
 | Edge Function | `supabase/functions/process-video/index.ts` | Browser-callable proxy or mock analysis function. |
@@ -93,7 +93,7 @@ Two modes are supported:
 
 The backend uses OpenAI TTS and FFmpeg from `imageio-ffmpeg` to produce `vision2voice-voiceover.mp4`.
 
-## Live Replay Pipeline
+## Live Replay and YouTube Feed-Live Pipeline
 
 Live Replay requires direct backend mode.
 
@@ -117,11 +117,16 @@ The backend:
 6. Emits `caption` events from feed events, feed context, and optional vision observations.
 7. Persists live sessions/captions when Supabase service credentials are configured.
 
+YouTube Feed-Live uses the same `/live/sessions` and SSE surface with `source_type: "youtube_embed"` and `clock_mode: "feed_live"`. The browser embeds YouTube with `enablejsapi=1`; the backend never downloads or samples the YouTube media. Captions are emitted only for newly observed NBA play-by-play events from polling the feed.
+
+The Chrome extension uses `source_type: "youtube_watch"` from the real YouTube watch page. Live streams use `clock_mode: "feed_live"`. Recorded videos use `clock_mode: "replay_media"` and send player time through `/live/sessions/{session_id}/playback`; replay-file sessions auto-detect the opening scorebug clock, while YouTube watch sessions use the backend replay clock fallback because the backend does not download YouTube media.
+
 ## Source of Truth Rules
 
 - For standard clip analysis, vision output is the primary structured source.
 - For Live Replay, structured NBA play-by-play is the primary source of truth.
 - Live Replay vision is supporting evidence and should be cautious when it conflicts with feed data.
+- For YouTube Feed-Live, structured NBA play-by-play is the only caption source.
 - Local knowledge is supplemental context, not a replacement for official game data.
 
 ## Persistence Boundaries
