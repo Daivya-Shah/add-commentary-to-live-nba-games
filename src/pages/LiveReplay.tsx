@@ -460,10 +460,18 @@ const LiveReplay = () => {
         season: seasonQuery.trim(),
         season_type: seasonType,
         limit: 20,
-        timeoutMs: 8000,
+        timeoutMs: 15000,
       });
       setGameResults(results);
-      if (results.length === 0) setSearchError("NO MATCHING GAMES FOUND.");
+      if (results.length === 0) {
+        clearSelectedGame();
+        setSearchError("NO MATCHING GAMES FOUND.");
+      } else {
+        const currentGameId = gameId.trim();
+        const selected = results.find((result) => result.game_id === currentGameId) ?? results[0];
+        setSelectedGame(selected);
+        setGameId(selected.game_id);
+      }
     } catch (e) {
       setSearchError(e instanceof Error ? e.message.toUpperCase() : "GAME SEARCH FAILED.");
     } finally {

@@ -815,9 +815,9 @@ async def search_live_games(
                 season=season,
                 season_type=season_type,
                 limit=capped_limit,
-                timeout=6,
+                timeout=12,
             ),
-            timeout=8,
+            timeout=15,
         )
         response = [LiveGameSearchResultResponse(**asdict(result)) for result in results]
         _live_game_search_cache[cache_key] = response

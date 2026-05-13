@@ -262,7 +262,7 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(response.json()[0]["game_id"], "0022300157")
         search.assert_called_once()
-        self.assertEqual(search.call_args.kwargs["timeout"], 6)
+        self.assertEqual(search.call_args.kwargs["timeout"], 12)
 
     def test_live_game_search_normalizes_stats_nba_timeout(self):
         client = TestClient(main.app)
