@@ -743,6 +743,44 @@ async def upload_live_replay(request: Request, filename: str = "replay.mp4") -> 
         suffix = ".mp4"
     upload_id = uuid.uuid4().hex
 
+    # Supabase Storage is required on serverless hosts. For localhost development,
+    # keep uploaded replay files on the local API even if Supabase credentials are
+    # present for persistence elsewhere in the app.
+    _sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    _sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    _storage_mode = os.getenv("LIVE_UPLOAD_STORAGE", "").strip().lower()
+    _local_hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
+    _request_host = (request.url.hostname or "").lower()
+    _use_supabase_uploads = (
+        _storage_mode in {"supabase", "storage"}
+        or (_storage_mode not in {"local", "filesystem", "fs"} and _request_host not in _local_hosts)
+    )
+
+    if not (_sb_url and _sb_key and _use_supabase_uploads):
+        upload_dir = Path(tempfile.gettempdir()) / "vision2voice-live-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        out_path = upload_dir / f"{upload_id}{suffix}"
+        size = 0
+        try:
+            with out_path.open("wb") as out_file:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    out_file.write(chunk)
+            if size == 0:
+                raise HTTPException(status_code=400, detail="Uploaded replay file is empty.")
+        except Exception:
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
+            raise
+        return LiveUploadResponse(
+            upload_id=upload_id,
+            file_url=str(request.url_for("get_live_replay_upload", upload_id=upload_id)),
+            filename=filename,
+            size_bytes=size,
+        )
+
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
@@ -753,12 +791,7 @@ async def upload_live_replay(request: Request, filename: str = "replay.mp4") -> 
         raise HTTPException(status_code=400, detail="Uploaded replay file is empty.")
 
     body = b"".join(chunks)
-
-    # Supabase Storage: required on Vercel (serverless has no shared filesystem).
-    # Falls back to local temp dir when Supabase is not configured (local dev).
-    _sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-    _sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    if _sb_url and _sb_key:
+    if _sb_url and _sb_key and _use_supabase_uploads:
         _bucket = "live-uploads"
         _object = f"{upload_id}{suffix}"
         _content_types = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v", ".webm": "video/webm"}
@@ -781,24 +814,7 @@ async def upload_live_replay(request: Request, filename: str = "replay.mp4") -> 
         file_url = f"{_sb_url}/storage/v1/object/public/{_bucket}/{_object}"
         return LiveUploadResponse(upload_id=upload_id, file_url=file_url, filename=filename, size_bytes=size)
 
-    # Local dev fallback: write to temp directory
-    upload_dir = Path(tempfile.gettempdir()) / "vision2voice-live-uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    out_path = upload_dir / f"{upload_id}{suffix}"
-    try:
-        out_path.write_bytes(body)
-    except Exception:
-        try:
-            out_path.unlink()
-        except OSError:
-            pass
-        raise
-    return LiveUploadResponse(
-        upload_id=upload_id,
-        file_url=str(request.url_for("get_live_replay_upload", upload_id=upload_id)),
-        filename=filename,
-        size_bytes=size,
-    )
+    raise HTTPException(status_code=500, detail="Live upload storage is not configured.")
 
 
 @app.get("/live/uploads/{upload_id}")

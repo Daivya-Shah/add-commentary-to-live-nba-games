@@ -193,7 +193,7 @@ export async function fetchLiveTeams(timeoutMs = 8000): Promise<LiveTeamOption[]
   }
 }
 
-export async function uploadLiveReplayFile(file: File, timeoutMs = 90000): Promise<LiveUploadResponse> {
+export async function uploadLiveReplayFile(file: File, timeoutMs = 600000): Promise<LiveUploadResponse> {
   const base = requireBackendBaseUrl();
   const qs = new URLSearchParams({ filename: file.name || "replay.mp4" });
   const controller = new AbortController();
@@ -213,7 +213,7 @@ export async function uploadLiveReplayFile(file: File, timeoutMs = 90000): Promi
     return data as LiveUploadResponse;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Replay upload timed out. Try a smaller clip or use URL mode.");
+      throw new Error("Replay upload timed out after 10 minutes. Try a smaller clip or use URL mode.");
     }
     throw error;
   } finally {

@@ -91,6 +91,51 @@ describe("LiveReplay", () => {
     expect(screen.getByText(/SELECTED/i)).toBeInTheDocument();
   });
 
+  it("accepts a pasted matchup when searching games", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
+    let searchUrl = "";
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/live/teams")) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/live/games/search")) {
+        searchUrl = url;
+        return new Response(
+          JSON.stringify([
+            {
+              game_id: "0022300157",
+              game_date: "2023-11-08",
+              season: "2023-24",
+              season_type: "Regular Season",
+              matchup: "WAS @ CHA",
+              team_abbreviation: "WAS",
+              opponent_abbreviation: "CHA",
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+
+    render(
+      <MemoryRouter>
+        <LiveReplay />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText(/^Team$/i), { target: { value: "WAS @ CHA" } });
+    fireEvent.change(screen.getByLabelText(/Opponent/i), { target: { value: "stale opponent" } });
+    fireEvent.change(screen.getByLabelText(/NBA season/i), { target: { value: "2023-24" } });
+    fireEvent.click(screen.getByRole("button", { name: /search/i }));
+
+    await screen.findByText("0022300157");
+    const query = new URL(searchUrl).searchParams;
+    expect(query.get("team")).toBe("WAS");
+    expect(query.get("opponent")).toBe("CHA");
+  });
+
   it("starts from manual game setup and sends the optional knowledge flag", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "http://127.0.0.1:8000");
     class FakeEventSource {

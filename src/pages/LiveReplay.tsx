@@ -283,7 +283,7 @@ const LiveReplay = () => {
     if (!backendReady) {
       throw new Error("Set VITE_BACKEND_URL and run the local backend before uploading live replay files.");
     }
-    const upload = await uploadLiveReplayFile(file, 90000);
+    const upload = await uploadLiveReplayFile(file);
     return upload.file_url;
   };
 
@@ -446,8 +446,9 @@ const LiveReplay = () => {
   };
 
   const handleGameSearch = async () => {
-    if (!teamQuery.trim() || !opponentQuery.trim() || !seasonQuery.trim()) {
-      setSearchError("ENTER TWO TEAMS AND AN NBA SEASON.");
+    const parsedMatchup = parseMatchupSearch(teamQuery, opponentQuery);
+    if (!parsedMatchup || !seasonQuery.trim()) {
+      setSearchError("ENTER A MATCHUP OR TWO TEAMS AND AN NBA SEASON.");
       return;
     }
     setSearchingGames(true);
@@ -455,8 +456,8 @@ const LiveReplay = () => {
     setGameResults([]);
     try {
       const results = await searchLiveGames({
-        team: teamQuery.trim(),
-        opponent: opponentQuery.trim(),
+        team: parsedMatchup.team,
+        opponent: parsedMatchup.opponent,
         season: seasonQuery.trim(),
         season_type: seasonType,
         limit: 20,
@@ -1303,6 +1304,27 @@ const defaultNbaSeason = (): string => {
   const now = new Date();
   const startYear = now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;
   return `${startYear}-${String((startYear + 1) % 100).padStart(2, "0")}`;
+};
+
+const parseMatchupSearch = (teamInput: string, opponentInput: string): { team: string; opponent: string } | null => {
+  const team = teamInput.trim();
+  const opponent = opponentInput.trim();
+  const teamMatchup = parseMatchupText(team);
+  if (teamMatchup) return teamMatchup;
+  const opponentMatchup = parseMatchupText(opponent);
+  if (opponentMatchup) return opponentMatchup;
+  if (team && opponent) return { team, opponent };
+
+  const matchup = team || opponent;
+  return parseMatchupText(matchup);
+};
+
+const parseMatchupText = (matchup: string): { team: string; opponent: string } | null => {
+  const match = matchup.match(/^\s*(.+?)\s+(?:@|vs\.?|v\.?|at)\s+(.+?)\s*$/i);
+  if (!match) return null;
+  const [, parsedTeam, parsedOpponent] = match;
+  if (!parsedTeam.trim() || !parsedOpponent.trim()) return null;
+  return { team: parsedTeam.trim(), opponent: parsedOpponent.trim() };
 };
 
 const formatGameDate = (value: string): string => {
