@@ -742,27 +742,57 @@ async def upload_live_replay(request: Request, filename: str = "replay.mp4") -> 
     if suffix not in {".mp4", ".mov", ".m4v", ".webm"}:
         suffix = ".mp4"
     upload_id = uuid.uuid4().hex
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        chunks.append(chunk)
+
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded replay file is empty.")
+
+    body = b"".join(chunks)
+
+    # Supabase Storage: required on Vercel (serverless has no shared filesystem).
+    # Falls back to local temp dir when Supabase is not configured (local dev).
+    _sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    _sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    if _sb_url and _sb_key:
+        _bucket = "live-uploads"
+        _object = f"{upload_id}{suffix}"
+        _content_types = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v", ".webm": "video/webm"}
+        _ct = _content_types.get(suffix, "video/mp4")
+        _auth = {"apikey": _sb_key, "Authorization": f"Bearer {_sb_key}"}
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Create bucket if it doesn't exist (409 = already exists, safe to ignore)
+            await client.post(
+                f"{_sb_url}/storage/v1/bucket",
+                headers={**_auth, "Content-Type": "application/json"},
+                json={"id": _bucket, "name": _bucket, "public": True},
+            )
+            r = await client.post(
+                f"{_sb_url}/storage/v1/object/{_bucket}/{_object}",
+                headers={**_auth, "Content-Type": _ct, "x-upsert": "true"},
+                content=body,
+            )
+        if r.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Storage upload failed: {r.text[:200]}")
+        file_url = f"{_sb_url}/storage/v1/object/public/{_bucket}/{_object}"
+        return LiveUploadResponse(upload_id=upload_id, file_url=file_url, filename=filename, size_bytes=size)
+
+    # Local dev fallback: write to temp directory
     upload_dir = Path(tempfile.gettempdir()) / "vision2voice-live-uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     out_path = upload_dir / f"{upload_id}{suffix}"
-    size = 0
     try:
-        with out_path.open("wb") as out:
-            async for chunk in request.stream():
-                size += len(chunk)
-                out.write(chunk)
+        out_path.write_bytes(body)
     except Exception:
         try:
             out_path.unlink()
         except OSError:
             pass
         raise
-    if size == 0:
-        try:
-            out_path.unlink()
-        except OSError:
-            pass
-        raise HTTPException(status_code=400, detail="Uploaded replay file is empty.")
     return LiveUploadResponse(
         upload_id=upload_id,
         file_url=str(request.url_for("get_live_replay_upload", upload_id=upload_id)),
