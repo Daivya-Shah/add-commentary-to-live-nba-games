@@ -9,7 +9,8 @@
     "backend": {
       "entrypoint": "backend",
       "routePrefix": "/_/backend",
-      "framework": "fastapi"
+      "framework": "fastapi",
+      "maxDuration": 300
     }
   }
 }
