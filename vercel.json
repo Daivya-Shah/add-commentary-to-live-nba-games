@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "experimentalServices": {
     "frontend": {
-      "entrypoint": "frontend",
+      "entrypoint": ".",
       "routePrefix": "/",
       "framework": "vite"
     },
