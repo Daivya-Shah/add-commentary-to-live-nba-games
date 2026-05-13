@@ -52,16 +52,26 @@ For detailed maintainer documentation, see [`docs/`](./docs/README.md).
 ```
 ├── src/                    # React app
 │   ├── lib/analysis.ts     # analyze pipeline + voiceover export client
+│   ├── lib/live.ts         # live session API client + SSE helpers
 │   ├── pages/Index.tsx
+│   ├── pages/LiveReplay.tsx
 │   └── components/ResultsPanel.tsx
 ├── backend/
-│   ├── main.py             # FastAPI: /analyze, /regenerate, /export-commentary-video
+│   ├── main.py             # FastAPI: all HTTP routes (analyze, live, voiceover)
+│   ├── live_sessions.py    # async session manager, SSE producer, replay loops
+│   ├── live_state.py       # state reconciliation + caption template / GPT generation
+│   ├── live_game_data.py   # NBA play-by-play + game search adapters (nba_api)
+│   ├── live_kb.py          # in-memory pregame knowledge base for caption context
 │   ├── timeline.py         # timeline normalize + segment commentary + summary align
 │   ├── jersey_resolve.py   # NBA roster enrichment
 │   ├── voiceover_export.py # TTS + FFmpeg mux
 │   ├── openai_retry.py     # retry on 429 / transient errors
 │   ├── data/knowledge.json # curated player/team facts for retrieval UI
 │   └── requirements.txt
+├── extension/              # Chrome extension (wraps Live Replay for YouTube tabs)
+│   ├── background.ts       # service worker: SSE relay + session state
+│   ├── content.ts          # YouTube page injector
+│   └── popup.tsx           # extension popup UI
 ├── supabase/
 │   ├── migrations/         # apply to your Supabase project
 │   └── functions/process-video/
@@ -107,16 +117,21 @@ Copy `backend/.env.example` → `backend/.env`. **Never commit real keys.**
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | For real analysis / TTS | Vision, timeline text, TTS, summary alignment |
+| `OPENAI_API_KEY` | For real analysis / TTS | Vision, timeline text, live captions, TTS, summary alignment |
 | `SUPABASE_URL` | Optional | Persist results to Postgres (mirror Edge behavior) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Optional | **Server only** — with `SUPABASE_URL`, writes detections / context / commentaries |
+| `SUPABASE_SERVICE_ROLE_KEY` | Optional | **Server only** — with `SUPABASE_URL`, writes detections / context / commentaries / live sessions |
 | `CORS_ORIGINS` | For browser calls | Comma-separated origins; include your Vite dev origin and production URL |
-| `FRAME_SAMPLE_COUNT` | Optional | Default `16` — frame count for vision |
+| `FRAME_SAMPLE_COUNT` | Optional | Default `16` — frame count for offline vision |
 | `NBA_ROSTER_LOOKUP` | Optional | Set `0` to disable jersey→name roster pass |
+| `OPENAI_VISION_MODEL` | Optional | Default `gpt-5-mini` — model for frame analysis and scorebug detection |
+| `OPENAI_TEXT_MODEL` | Optional | Default `gpt-4o-mini` — model for offline commentary and timeline lines |
+| `OPENAI_LIVE_TEXT_MODEL` | Optional | Default `gpt-5.4-nano` — model for live caption generation (optimized for latency) |
+| `LIVE_CLOCK_AUTO_DETECT` | Optional | Default `1` — set `0` to skip opening-frame scorebug clock detection |
+| `LIVE_VISION_ENABLED` | Optional | Default `1` — set `0` to keep the live hot path feed/template-only (no vision calls) |
 | `VOICEOVER_PLAYBACK_SPEED` | Optional | Default `1.5` — natural TTS slot factor before tempo to fit video |
 | `OPENAI_RETRY_*` | Optional | Backoff when OpenAI returns 429 / transient errors |
 
-See `backend/.env.example` for model names, TTS voice, and NBA hint scoring.
+See `backend/.env.example` for TTS voice, NBA hint scoring, and all live timeout knobs.
 
 ---
 
@@ -185,6 +200,8 @@ npm run dev:backend  # API only (expects backend/.venv)
 | `npm run dev:backend` | Uvicorn `main:app` on port 8000 with reload |
 | `npm run dev:full` | Both in parallel |
 | `npm run build` | Production build → `dist/` |
+| `npm run build:dev` | Development build (source maps, no minification) |
+| `npm run build:extension` | Bundle the Chrome extension |
 | `npm run preview` | Preview production build locally |
 
 ---
@@ -197,15 +214,34 @@ npm run dev:backend  # API only (expects backend/.venv)
 | `POST` | `/analyze` | Body: `{ "clip_id", "file_url" }` — full pipeline |
 | `POST` | `/regenerate` | Uses latest stored detection from Supabase when available; otherwise re-analyzes |
 | `POST` | `/export-commentary-video` | Body: `file_url`, `commentary_text`, optional `possession_timeline` + `segment_commentary_lines` for segment-aligned audio |
-| `POST` | `/live/sessions` | Starts a simulated-live replay session from a video URL + NBA game id; replay files auto-detect the opening scorebug clock |
-| `GET` | `/live/sessions/{session_id}/events` | Server-Sent Events stream for live status, ticks, captions, warnings, and completion |
-| `POST` | `/live/sessions/{session_id}/stop` | Stops an active live replay session |
+| `POST` | `/live/uploads` | Accept raw video body; stores to Supabase Storage or local temp dir; returns `file_url` |
+| `GET` | `/live/uploads/{upload_id}` | Serve a locally stored upload (local dev only) |
+| `GET` | `/live/teams` | All NBA teams (`team_id`, `name`, `abbreviation`, `city`) |
+| `GET` | `/live/games/search` | Search games by `team`, `opponent`, `season`, `season_type`; results cached in memory |
+| `POST` | `/live/sessions` | Start a replay or live-feed session; replay files auto-detect the opening scorebug clock |
+| `GET` | `/live/sessions/{session_id}/events` | Server-Sent Events stream: `connected`, `session_ready`, `tick`, `caption`, `caption_update`, `complete`, `stopped`, `error`, `ping` |
+| `POST` | `/live/sessions/{session_id}/playback` | Sync play/pause/seek/rate from the client video player |
+| `POST` | `/live/sessions/{session_id}/stop` | Stop an active live replay session |
 
 ## Live Replay pipeline
 
 The **Live Replay Desk** is available at `/live` when `VITE_BACKEND_URL` points at the Python API. It treats a prerecorded video as a live source, aligns replay time to an NBA game id / period / clock, loads rosters and play-by-play with `nba_api`, builds an in-memory pregame knowledge packet, and streams text captions over SSE.
 
 V1 defaults to 1-second chunks and a 2-second rolling window. Structured play-by-play is treated as the source of truth; vision is used as gated visual evidence or cautious `vision_only` fallback commentary. Live review metadata can be persisted to the `live_sessions` and `live_captions` tables when backend Supabase service credentials are configured.
+
+---
+
+## Chrome extension
+
+The `extension/` directory contains a Chrome extension that wraps the Live Replay Desk for YouTube. It runs the SSE relay in a background service worker (so captions survive tab switches), detects the active YouTube tab and video ID, and injects a caption overlay via a content script.
+
+To build it:
+
+```bash
+npm run build:extension
+```
+
+Load the output directory as an unpacked extension in `chrome://extensions`. The extension requires `VITE_BACKEND_URL` to be pointed at a running backend.
 
 ---
 
