@@ -111,6 +111,34 @@ export function getBackendBaseUrl(): string | undefined {
   return b || undefined;
 }
 
+/** Upload clip file via FastAPI using service role (avoids Storage RLS in the browser). */
+export async function uploadClipFileForAnalysis(file: File): Promise<{ clipId: string; fileUrl: string }> {
+  const base = getBackendBaseUrl();
+  if (!base) {
+    throw new Error("VITE_BACKEND_URL is not set — cannot use server-side upload.");
+  }
+  const q = new URLSearchParams({ filename: file.name || "clip.mp4" });
+  const res = await fetch(`${base}/clips/upload?${q}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(`Bad response from backend (${res.status})`);
+  }
+  if (!res.ok) {
+    throw parseBackendError(res, data);
+  }
+  const o = data as { clip_id?: string; file_url?: string };
+  if (!o.clip_id || !o.file_url) {
+    throw new Error("Invalid upload response from backend.");
+  }
+  return { clipId: o.clip_id, fileUrl: o.file_url };
+}
+
 /** MP4 with OpenAI TTS voiceover (requires local backend + OPENAI_API_KEY on server). */
 export async function exportCommentaryVideo(
   fileUrl: string,

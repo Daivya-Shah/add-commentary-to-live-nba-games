@@ -81,6 +81,19 @@ class ClipRequest(BaseModel):
     file_url: str
 
 
+class ClipUploadResponse(BaseModel):
+    clip_id: str
+    file_url: str
+
+
+def _safe_storage_object_name(original: str) -> str:
+    """ASCII-safe object key under the videos bucket (no path segments)."""
+    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    base = Path(original).name.strip() or "video.bin"
+    base = re.sub(r"[^a-zA-Z0-9._-]", "_", base)
+    return f"{ts}_{base}"
+
+
 class VoiceoverExportBody(BaseModel):
     file_url: str
     commentary_text: str = ""
@@ -734,6 +747,81 @@ async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> An
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/clips/upload", response_model=ClipUploadResponse)
+async def upload_clip_file_for_analysis(
+    request: Request,
+    filename: str = "clip.mp4",
+) -> ClipUploadResponse:
+    """Put the file in the `videos` bucket and create a clip row using the service role.
+
+    Browser uploads use the anon key and hit Storage RLS; this path bypasses RLS when
+    SUPABASE_SERVICE_ROLE_KEY is configured on the API server.
+
+    Send the raw file bytes as the request body (same pattern as ``/live/uploads``).
+    """
+    base = os.getenv("SUPABASE_URL", "").rstrip("/")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not base or not key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in backend/.env so the server "
+                "can upload to Storage and insert into clips (bypasses Storage RLS from the browser)."
+            ),
+        )
+
+    title = (filename or "clip").strip() or "clip"
+    object_name = _safe_storage_object_name(filename or "video.bin")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    content_type = request.headers.get("content-type") or "application/octet-stream"
+    storage_url = f"{base}/storage/v1/object/videos/{object_name}"
+    headers_upload = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": content_type,
+        "x-upsert": "true",
+    }
+    rest_headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    public_url = f"{base}/storage/v1/object/public/videos/{object_name}"
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        sr = await client.post(storage_url, headers=headers_upload, content=body)
+        if sr.status_code not in (200, 201):
+            logger.warning("Supabase storage upload failed: %s %s", sr.status_code, sr.text)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase storage upload failed ({sr.status_code}): {sr.text}",
+            )
+
+        cr = await client.post(
+            f"{base}/rest/v1/clips",
+            headers=rest_headers,
+            json={"title": title, "file_url": public_url},
+        )
+        if cr.status_code not in (200, 201):
+            logger.warning("Supabase clips insert failed: %s %s", cr.status_code, cr.text)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase clips insert failed ({cr.status_code}): {cr.text}",
+            )
+        rows = cr.json()
+        if not isinstance(rows, list) or not rows:
+            raise HTTPException(status_code=502, detail="Supabase clips insert returned unexpected body.")
+        clip_id = rows[0].get("id")
+        if not clip_id:
+            raise HTTPException(status_code=502, detail="Supabase clips insert missing id.")
+
+    return ClipUploadResponse(clip_id=str(clip_id), file_url=public_url)
 
 
 @app.post("/live/uploads", response_model=LiveUploadResponse)

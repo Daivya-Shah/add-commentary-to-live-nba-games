@@ -204,23 +204,7 @@
     position: relative;
     isolation: isolate;
     overflow: hidden;
-    background: #152331;
-    background: -webkit-linear-gradient(to right, #000000, #152331);
     background: linear-gradient(to right, #000000, #152331);
-  }
-  .local-minima-bg::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background: radial-gradient(62% 34% at 50% 26%, rgba(180, 116, 255, 0.34), transparent 72%);
-    filter: blur(28px);
-    opacity: 0.74;
-    animation: aura-pulse 9s ease-in-out infinite alternate;
-  }
-  .local-minima-bg::after {
-    content: none;
   }
   .local-minima-bg > * {
     position: relative;
@@ -337,15 +321,6 @@
     }
     100% {
       filter: saturate(1.14) brightness(1.05);
-    }
-  }
-
-  @keyframes aura-pulse {
-    0% {
-      opacity: 0.72;
-    }
-    100% {
-      opacity: 0.94;
     }
   }
 

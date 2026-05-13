@@ -4,9 +4,13 @@ import { supabase } from "@/integrations/supabase/client";
 import UploadZone from "@/components/UploadZone";
 import ProcessingStatus, { type ProcessingStep } from "@/components/ProcessingStatus";
 import ResultsPanel from "@/components/ResultsPanel";
-import { runAnalysisPipeline, type AnalysisResult } from "@/lib/analysis";
+import {
+  hasDirectBackend,
+  runAnalysisPipeline,
+  uploadClipFileForAnalysis,
+  type AnalysisResult,
+} from "@/lib/analysis";
 import { usePersistentState } from "@/hooks/usePersistentState";
-import { Rule } from "@/components/almanac";
 
 interface OfflineAnalysisState {
   step: ProcessingStep | null;
@@ -44,26 +48,41 @@ const Index = () => {
     setAnalysisState({ step: "uploading" });
 
     try {
-      const fileName = `${Date.now()}_${file.name}`;
-      const { error: uploadError } = await supabase.storage
-        .from("videos")
-        .upload(fileName, file);
-      if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+      let publicUrl: string;
+      let clipId: string;
 
-      const { data: urlData } = supabase.storage
-        .from("videos")
-        .getPublicUrl(fileName);
-      const publicUrl = urlData.publicUrl;
+      if (hasDirectBackend()) {
+        const up = await uploadClipFileForAnalysis(file);
+        clipId = up.clipId;
+        publicUrl = up.fileUrl;
+        setAnalysisState({ step: "processing" });
+      } else {
+        const fileName = `${Date.now()}_${file.name}`;
+        const { error: uploadError } = await supabase.storage
+          .from("videos")
+          .upload(fileName, file);
+        if (uploadError) {
+          const base = `Upload failed: ${uploadError.message}`;
+          const rlsHint =
+            /row-level security/i.test(uploadError.message) &&
+            " Fix Storage policies on the `videos` bucket (see supabase/migrations/20260512210000_fix_videos_storage_rls.sql) or run with VITE_BACKEND_URL + backend .env service role.";
+          throw new Error(base + (rlsHint || ""));
+        }
 
-      setAnalysisState({ step: "processing" });
-      const { data: clip, error: clipError } = await supabase
-        .from("clips")
-        .insert({ title: file.name, file_url: publicUrl })
-        .select()
-        .single();
-      if (clipError || !clip) throw new Error("Failed to save clip record");
+        const { data: urlData } = supabase.storage.from("videos").getPublicUrl(fileName);
+        publicUrl = urlData.publicUrl;
 
-      await runPipelineForClip(clip.id, publicUrl);
+        setAnalysisState({ step: "processing" });
+        const { data: clip, error: clipError } = await supabase
+          .from("clips")
+          .insert({ title: file.name, file_url: publicUrl })
+          .select()
+          .single();
+        if (clipError || !clip) throw new Error("Failed to save clip record");
+        clipId = clip.id;
+      }
+
+      await runPipelineForClip(clipId, publicUrl);
     } catch (err: unknown) {
       setAnalysisState((current) => ({
         ...current,
@@ -153,8 +172,7 @@ const Index = () => {
 
         {/* Processing */}
         {step && step !== "complete" && (
-          <section className="mt-12">
-            <Rule label="01·B / PROCESSING" marker="PIPELINE" />
+          <section className="mt-12 flex justify-center">
             <ProcessingStatus currentStep={step} error={error} />
           </section>
         )}

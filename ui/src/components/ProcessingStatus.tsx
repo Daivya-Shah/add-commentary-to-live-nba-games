@@ -1,4 +1,4 @@
-import { Progress } from "@/components/ui/progress";
+import { Loader2 } from "lucide-react";
 import { Marker } from "@/components/almanac";
 import { cn } from "@/lib/utils";
 
@@ -16,22 +16,26 @@ interface ProcessingStatusProps {
   error?: string;
 }
 
-const steps = [
-  { key: "uploading", label: "TRANSMITTING CLIP" },
-  { key: "processing", label: "REGISTERING RECORD" },
-  { key: "detecting", label: "DETECTING EVENT" },
-  { key: "retrieving", label: "RETRIEVING CONTEXT" },
-  { key: "generating", label: "WRITING THE CALL" },
+const PIPELINE_STEPS = [
+  { key: "uploading" as const, label: "TRANSMITTING CLIP" },
+  { key: "processing" as const, label: "REGISTERING RECORD" },
+  { key: "detecting" as const, label: "DETECTING EVENT" },
+  { key: "retrieving" as const, label: "RETRIEVING CONTEXT" },
+  { key: "generating" as const, label: "WRITING THE CALL" },
 ] as const;
 
-const stepOrder = steps.map((s) => s.key);
+function stepDisplay(step: ProcessingStep): { ordinal: string; label: string } | null {
+  const i = PIPELINE_STEPS.findIndex((s) => s.key === step);
+  if (i < 0) return null;
+  return { ordinal: String(i + 1).padStart(2, "0"), label: PIPELINE_STEPS[i].label };
+}
 
 const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
   if (currentStep === "complete" && !error) return null;
 
   if (error) {
     return (
-      <div className="border-y border-destructive/60 py-5">
+      <div className="w-full max-w-2xl border-y border-destructive/60 py-5">
         <div className="flex items-baseline justify-between gap-6">
           <Marker tone="accent">FAULT / 500</Marker>
           <span className="font-mono text-[10px] uppercase tracked text-destructive">PROCESSING FAILED</span>
@@ -41,43 +45,36 @@ const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
     );
   }
 
-  const currentIndex = stepOrder.indexOf(currentStep as (typeof stepOrder)[number]);
-  const safeIndex = currentIndex < 0 ? 0 : currentIndex;
-  const pct = Math.round(((safeIndex + 1) / stepOrder.length) * 100);
-  const active = steps[safeIndex];
+  const active = stepDisplay(currentStep);
 
   return (
-    <div className="space-y-3 py-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-3 font-mono text-[11px] uppercase tracked tabular">
-        <div className="flex items-baseline gap-3">
-          <span className="text-foreground/55">
-            STEP {String(safeIndex + 1).padStart(2, "0")}/{String(stepOrder.length).padStart(2, "0")}
-          </span>
-          <span className="text-foreground">{active.label}</span>
-        </div>
-        <span className="text-foreground/55 tabular">{String(pct).padStart(3, "0")}%</span>
+    <div
+      className="flex flex-col items-center justify-center gap-6 py-8 sm:gap-7"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={active ? `Step ${active.ordinal}: ${active.label}` : "Loading"}
+    >
+      {/* Only the current step — swaps when the step changes; spinner stays below */}
+      <div className="flex min-h-[4.5rem] w-full max-w-2xl items-end justify-center px-4 text-center sm:min-h-[5rem]">
+        {active ? (
+          <p
+            key={currentStep}
+            className={cn(
+              "font-mono text-base uppercase leading-snug tracking-[0.12em] text-foreground/90 sm:text-lg",
+              "animate-in fade-in-0 slide-in-from-bottom-2 duration-300",
+            )}
+          >
+            <span className="text-foreground/45">{active.ordinal}</span>{" "}
+            <span className="text-foreground">{active.label}</span>
+          </p>
+        ) : null}
       </div>
 
-      <Progress value={pct} />
-
-      <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] uppercase tracked tabular text-foreground/40">
-        {steps.map((step, i) => {
-          const isActive = step.key === currentStep;
-          const isDone = currentIndex > i;
-          return (
-            <span
-              key={step.key}
-              className={cn(
-                "transition-colors",
-                isActive && "text-foreground",
-                isDone && "text-foreground/65 line-through decoration-foreground/30",
-              )}
-            >
-              {String(i + 1).padStart(2, "0")} {step.label}
-            </span>
-          );
-        })}
-      </div>
+      <Loader2
+        className="h-14 w-14 shrink-0 animate-spin text-foreground/70 sm:h-16 sm:w-16"
+        strokeWidth={2}
+        aria-hidden
+      />
     </div>
   );
 };

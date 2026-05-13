@@ -27,6 +27,60 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(video.status_code, 200)
         self.assertEqual(video.content, b"fake mp4 bytes")
 
+    def test_clips_upload_returns_503_when_supabase_not_configured(self):
+        client = TestClient(main.app)
+        with patch.dict("os.environ", {"SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": ""}):
+            response = client.post(
+                "/clips/upload?filename=x.mp4",
+                content=b"fake-bytes",
+                headers={"Content-Type": "video/mp4"},
+            )
+        self.assertEqual(response.status_code, 503)
+
+    def test_clips_upload_proxies_to_supabase_storage_and_rest(self):
+        class FakeResp:
+            def __init__(self, status_code: int, json_body=None):
+                self.status_code = status_code
+                self.text = ""
+                self._json = json_body
+
+            def json(self):
+                return self._json
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def post(self, url: str, **kwargs):
+                if "/storage/v1/object/videos/" in url:
+                    return FakeResp(200)
+                if "/rest/v1/clips" in url:
+                    return FakeResp(201, [{"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"}])
+                raise AssertionError(f"unexpected url {url!r}")
+
+        client = TestClient(main.app)
+        env = {
+            "SUPABASE_URL": "https://ex.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "sk-test",
+        }
+        with patch.dict("os.environ", env):
+            with patch.object(main.httpx, "AsyncClient", return_value=FakeClient()):
+                response = client.post(
+                    "/clips/upload?filename=x.mp4",
+                    content=b"fake-bytes",
+                    headers={"Content-Type": "video/mp4"},
+                )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["clip_id"], "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        self.assertTrue(body["file_url"].startswith("https://ex.supabase.co/storage/v1/object/public/videos/"))
+
     def test_live_playback_control_forwards_media_clock(self):
         client = TestClient(main.app)
         with patch.object(main.live_sessions, "control_playback", AsyncMock(return_value=True)) as control:
