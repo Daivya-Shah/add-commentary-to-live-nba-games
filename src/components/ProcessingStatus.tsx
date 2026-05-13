@@ -27,7 +27,7 @@ const stepOrder = steps.map((s) => s.key);
 const ProcessingStatus = ({ currentStep, error }: ProcessingStatusProps) => {
   if (currentStep === "complete" && !error) return null;
 
-  const currentIndex = stepOrder.indexOf(currentStep as any);
+  const currentIndex = stepOrder.findIndex((step) => step === currentStep);
 
   return (
     <div className="mx-auto max-w-md py-8">

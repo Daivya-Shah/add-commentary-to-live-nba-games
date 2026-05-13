@@ -61,6 +61,7 @@ const sv = (k: string, v: unknown) => {
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const fmtJersey = (j?: string | null) => (j ? String(j).replace(/^#/, "") : null);
 
 function activeSegIdx(segs: PossessionSegment[], t: number) {
   const x = Math.min(1, Math.max(0, t));
@@ -176,8 +177,8 @@ const PossessionBar = ({
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
           <div className={`h-2 w-2 rounded-full flex-shrink-0 ${SEG_COLORS[ai % SEG_COLORS.length]}`} />
           <span className="text-xs font-semibold text-white/80">{active.player_name}</span>
-          {active.jersey_number_primary && (
-            <span className="text-xs text-primary font-bold">#{active.jersey_number_primary}</span>
+          {fmtJersey(active.jersey_number_primary) && (
+            <span className="text-xs text-primary font-bold">#{fmtJersey(active.jersey_number_primary)}</span>
           )}
           <span className="text-xs text-white/40">{active.event_type}</span>
           <span className="text-xs text-white/30">&middot;</span>
@@ -233,7 +234,7 @@ const SegmentTable = ({
                 </td>
                 <td className="px-4 py-2.5 font-medium text-white/80 whitespace-nowrap">{s.player_name}</td>
                 <td className="px-4 py-2.5 font-bold text-primary text-xs">
-                  {s.jersey_number_primary ? `#${s.jersey_number_primary}` : "—"}
+                  {fmtJersey(s.jersey_number_primary) ? `#${fmtJersey(s.jersey_number_primary)}` : "—"}
                 </td>
                 <td className="px-4 py-2.5 text-white/40 whitespace-nowrap text-xs">{s.team_name}</td>
                 <td className="px-4 py-2.5 text-white/55 italic text-xs max-w-xs">
@@ -274,17 +275,22 @@ export default function ResultsPanel({
   const [voiBusy,      setVoiBusy]      = useState(false);
   const [voiOn,        setVoiOn]        = useState(false);
   const [isRegen,      setIsRegen]      = useState(false);
+  const [regeneratedCommentary, setRegeneratedCommentary] = useState<string | null>(null);
 
   // Real-time frame analysis
   const canvasRef      = useRef<HTMLCanvasElement>(null);
   const liveFrameRef   = useRef<FrameResult | null>(null);
+  const stickyHolderRef = useRef<{ player: string; jersey: string | null; team: string; event: string; confidence: number; ts: number } | null>(null);
   const analyzingRef   = useRef(false);
   const [liveFrame, setLiveFrame] = useState<FrameResult | null>(null);
+  const [livePollMs, setLivePollMs] = useState(1500);
 
   const backendUrl = getBackendBaseUrl();
   const timeline   = result?.possession_timeline   ?? [];
   const segLines   = result?.segment_commentary_lines ?? [];
   const dur        = result?.duration ?? videoDur;
+  const commentaryText = regeneratedCommentary ?? result?.commentary_text ?? "";
+  const timelineConfidence = result?.confidence ?? null;
 
   const ai      = timeline.length > 0 ? activeSegIdx(timeline, playheadNorm) : -1;
   const activeSeg = ai >= 0 ? timeline[ai] : null;
@@ -297,17 +303,33 @@ export default function ResultsPanel({
   const evtCfg  = getE(displayEvent);
   const EIcon   = evtCfg.icon;
 
-  // Live frame wins when playing; pre-computed segment is the fallback when paused/scrubbing
-  const bh = (liveFrame && backendUrl)
+  const liveHasIdentity = Boolean(
+    liveFrame &&
+      liveFrame.player_name &&
+      liveFrame.player_name.toLowerCase() !== "unknown"
+  );
+  const liveBallLoose = Boolean(
+    liveFrame && ["loose_on_floor", "out_of_frame"].includes(String(liveFrame.ball_state ?? ""))
+  );
+  // Use live holder only when it has a real identity; otherwise keep stable timeline holder.
+  const bh = (isPlaying && liveFrame && backendUrl && liveBallLoose)
+    ? { player: "Loose Ball", jersey: null, team: "No clear control", event: liveFrame.event_type || "Other", conf: liveFrame.confidence, isLive: true }
+    : (isPlaying && liveFrame && backendUrl && liveHasIdentity)
     ? { player: liveFrame.player_name, jersey: liveFrame.jersey_number, team: liveFrame.team_name, event: liveFrame.event_type, conf: liveFrame.confidence, isLive: true }
     : activeSeg
     ? { player: displayPlayer, jersey: displayJersey, team: displayTeam, event: displayEvent, conf: result?.confidence ?? null, isLive: false }
-    : null;
+    : (liveFrame && backendUrl
+      ? { player: liveFrame.player_name, jersey: liveFrame.jersey_number, team: liveFrame.team_name, event: liveFrame.event_type, conf: liveFrame.confidence, isLive: true }
+      : null);
 
   const scoreboard   = result?.scoreboard    ?? null;
   const onScreenText = result?.on_screen_text ?? null;
   const players      = result?.players_stats  ?? [];
   const isComplete   = phase === "complete";
+
+  useEffect(() => {
+    setRegeneratedCommentary(null);
+  }, [result]);
 
   // ── Video time tracking ────────────────────────────────────────────────
   const onTimeUpdate = (e: SyntheticEvent<HTMLVideoElement>) => {
@@ -345,33 +367,93 @@ export default function ResultsPanel({
     analyzingRef.current = true;
     const ctx = canvas.getContext("2d");
     if (!ctx) { analyzingRef.current = false; return; }
-    canvas.width  = 640;
-    canvas.height = 360;
-    try { ctx.drawImage(vid, 0, 0, 640, 360); }
+    const vw = Math.max(vid.videoWidth || 0, 1);
+    const vh = Math.max(vid.videoHeight || 0, 1);
+    const targetW = Math.min(1280, Math.max(960, vw));
+    const targetH = Math.max(540, Math.round((targetW * vh) / vw));
+    canvas.width = targetW;
+    canvas.height = targetH;
+    try { ctx.drawImage(vid, 0, 0, targetW, targetH); }
     catch { analyzingRef.current = false; return; }
     const frameData = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
-    const prev = liveFrameRef.current;
+    const prev = liveFrameRef.current ?? (activeSeg ? {
+      player_name: activeSeg.player_name,
+      jersey_number: activeSeg.jersey_number_primary ?? null,
+      team_name: activeSeg.team_name,
+      confidence: timelineConfidence,
+      event_type: activeSeg.event_type,
+      ball_state: "in_hand",
+    } : null);
     try {
-      const r = await analyzeFrame({
+      const raw = await analyzeFrame({
         frame_data:  frameData,
         timestamp:   vid.currentTime,
         duration:    vid.duration,
         prev_player: prev?.player_name   ?? null,
         prev_jersey: prev?.jersey_number ?? null,
         prev_team:   prev?.team_name     ?? null,
+        prev_confidence: prev?.confidence ?? null,
+        prev_event: prev?.event_type ?? null,
+        prev_ball_state: prev?.ball_state ?? null,
       });
+      let r: FrameResult = raw;
+      const now = Date.now();
+      const sticky = stickyHolderRef.current;
+      const hasIdentity = Boolean(r.player_name && r.player_name.toLowerCase() !== "unknown");
+      const hasJersey = Boolean(r.jersey_number && String(r.jersey_number).trim() !== "");
+
+      if (hasIdentity && hasJersey) {
+        stickyHolderRef.current = {
+          player: r.player_name,
+          jersey: r.jersey_number,
+          team: r.team_name,
+          event: r.event_type,
+          confidence: r.confidence,
+          ts: now,
+        };
+      } else if (sticky && now - sticky.ts <= 7000) {
+        // Temporal memory: keep last confident holder/jersey during brief occlusions/turns.
+        if (!hasIdentity || r.player_name.toLowerCase() === "unknown") {
+          r = {
+            ...r,
+            player_name: sticky.player,
+            team_name: sticky.team,
+            jersey_number: sticky.jersey,
+            event_type: r.event_type || sticky.event,
+            confidence: Math.max(r.confidence ?? 0, Math.max(0.35, sticky.confidence - 0.15)),
+          };
+        } else if (!hasJersey && r.player_name.toLowerCase() === sticky.player.toLowerCase()) {
+          r = { ...r, jersey_number: sticky.jersey };
+        }
+      }
+
       liveFrameRef.current = r;
       setLiveFrame(r);
+      const rateLimited = Boolean((raw as { rate_limited?: boolean }).rate_limited);
+      if (rateLimited) {
+        setLivePollMs((ms) => Math.min(7000, Math.round(ms * 1.5)));
+      } else {
+        setLivePollMs((ms) => Math.max(1200, Math.round(ms * 0.92)));
+      }
     } catch { /* silently fail — don't interrupt playback */ }
     finally { analyzingRef.current = false; }
-  }, [backendUrl]);
+  }, [activeSeg, backendUrl, timelineConfidence]);
 
-  // Poll every 2 s while playing (matches ~200k token budget for a 6-min video)
+  // Poll while playing for responsive holder/event updates.
   useEffect(() => {
     if (!isPlaying || !backendUrl) return;
-    const id = setInterval(captureAndAnalyze, 2000);
+    const id = setInterval(captureAndAnalyze, livePollMs);
     return () => clearInterval(id);
-  }, [isPlaying, backendUrl, captureAndAnalyze]);
+  }, [isPlaying, backendUrl, captureAndAnalyze, livePollMs]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      setLiveFrame(null);
+      liveFrameRef.current = null;
+      stickyHolderRef.current = null;
+      setLivePollMs(1500);
+    }
+  }, [isPlaying]);
 
   const toggleVoiceover = async () => {
     if (voiBusy || !cloudUrl || !result) return;
@@ -379,7 +461,7 @@ export default function ResultsPanel({
       if (!backendUrl) { toast.error("Backend required for voiceover."); return; }
       setVoiBusy(true);
       try {
-        const blob = await exportCommentaryVideo(cloudUrl, result.commentary_text, {
+        const blob = await exportCommentaryVideo(cloudUrl, commentaryText, {
           possession_timeline: result.possession_timeline,
           segment_commentary_lines: result.segment_commentary_lines,
         });
@@ -391,8 +473,8 @@ export default function ResultsPanel({
   };
 
   const handleCopy = () => {
-    if (!result?.commentary_text) return;
-    navigator.clipboard.writeText(result.commentary_text);
+    if (!commentaryText) return;
+    navigator.clipboard.writeText(commentaryText);
     toast.success("Copied");
   };
 
@@ -402,8 +484,7 @@ export default function ResultsPanel({
     try {
       const r = await runAnalysisPipeline("regen", cloudUrl, "regenerate");
       toast.success("Commentary regenerated");
-      // Update only the commentary text
-      result.commentary_text = r.commentary_text;
+      setRegeneratedCommentary(r.commentary_text);
     } catch { toast.error("Regeneration failed"); }
     finally { setIsRegen(false); }
   };
@@ -439,9 +520,9 @@ export default function ResultsPanel({
         <div className="bg-black flex items-center justify-center lg:border-r border-white/[0.05]" style={{ maxHeight: 500 }}>
           <video ref={vidRef} key={localUrl} src={localUrl} controls playsInline
             className="w-full h-full" style={{ maxHeight: 500, objectFit: "contain" }}
-            onTimeUpdate={onTimeUpdate} onSeeked={onTimeUpdate}
+            onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onTimeUpdate}
-            onPlay={() => setIsPlaying(true)}
+            onPlay={() => { setIsPlaying(true); void captureAndAnalyze(); }}
             onPause={() => setIsPlaying(false)}
             onEnded={() => { setIsPlaying(false); setLiveFrame(null); liveFrameRef.current = null; }}
             onSeeked={e => { onTimeUpdate(e as SyntheticEvent<HTMLVideoElement>); setLiveFrame(null); liveFrameRef.current = null; }} />
@@ -477,9 +558,9 @@ export default function ResultsPanel({
               <div key={`${bh.player}-${bh.isLive ? liveFrame?.timestamp : ai}`} className="animate-fade-in-up space-y-3">
                 {/* Jersey box + name */}
                 <div className="flex items-center gap-3">
-                  {bh.jersey ? (
+                  {fmtJersey(bh.jersey) ? (
                     <div className="w-14 h-14 rounded-2xl bg-primary/15 border border-primary/25 flex items-center justify-center flex-shrink-0">
-                      <span className="font-display text-2xl font-black text-primary leading-none">#{bh.jersey}</span>
+                      <span className="font-display text-2xl font-black text-primary leading-none">#{fmtJersey(bh.jersey)}</span>
                     </div>
                   ) : (
                     <div className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center flex-shrink-0">
@@ -513,9 +594,9 @@ export default function ResultsPanel({
               <p key={`line-${ai}`} className="text-sm leading-relaxed text-white/75 italic animate-fade-in-up">
                 &ldquo;{displayLine}&rdquo;
               </p>
-            ) : result?.commentary_text ? (
+            ) : commentaryText ? (
               <p className="text-sm leading-relaxed text-white/50 italic line-clamp-3">
-                &ldquo;{result.commentary_text}&rdquo;
+                &ldquo;{commentaryText}&rdquo;
               </p>
             ) : isStreaming ? (
               <div className="space-y-2"><Sk cls="h-4 w-full" /><Sk cls="h-4 w-4/5" /></div>
@@ -616,7 +697,7 @@ export default function ResultsPanel({
         )}
 
         {/* Full commentary */}
-        {(result?.commentary_text || isStreaming) && (
+        {(commentaryText || isStreaming) && (
           <section>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-[10px] font-bold uppercase tracking-[0.18em] text-white/25">Full Commentary Script</h2>
@@ -632,8 +713,8 @@ export default function ResultsPanel({
               </div>
             </div>
             <div className="rounded-2xl bg-[#111118] border border-white/[0.04] p-6">
-              {result?.commentary_text ? (
-                <p className="text-base leading-8 text-white/70 italic">&ldquo;{result.commentary_text}&rdquo;</p>
+              {commentaryText ? (
+                <p className="text-base leading-8 text-white/70 italic">&ldquo;{commentaryText}&rdquo;</p>
               ) : (
                 <div className="space-y-3"><Sk cls="h-4 w-full" /><Sk cls="h-4 w-5/6" /><Sk cls="h-4 w-4/6" /></div>
               )}

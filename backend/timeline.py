@@ -123,7 +123,7 @@ async def commentary_lines_for_timeline(
         }
         for s in segments
     ]
-    payload = json.dumps(slim, indent=2)
+    payload = json.dumps(slim, separators=(",", ":"))
     n = len(segments)
     prompt = f"""You are an NBA TV play-by-play announcer. The clip is split into {n} time-ordered segments.
 For EACH segment, write exactly ONE short sentence (max 22 words) for live commentary.
@@ -140,13 +140,15 @@ Reply with ONLY valid JSON: {{"lines": [<string>, ...]}} with exactly {n} string
 
     client = AsyncOpenAI()
 
+    _tl_max = max(200, min(2048, int(os.getenv("OPENAI_TIMELINE_COMMENTARY_MAX_TOKENS", "640"))))
+
     async def _timeline_call():
         return await client.chat.completions.create(
             model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=float(temperature),
-            max_tokens=800,
+            max_tokens=_tl_max,
         )
 
     resp = await with_openai_retry(_timeline_call, label="timeline_commentary")
@@ -187,12 +189,14 @@ async def commentary_line_for_segment(
         "Rules: name the player with the ball, match event_type, broadcast style. Plain text only."
     )
 
+    _seg_max = max(32, min(128, int(os.getenv("OPENAI_SEGMENT_LINE_MAX_TOKENS", "48"))))
+
     async def _call():
         return await client.chat.completions.create(
             model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
-            max_tokens=60,
+            max_tokens=_seg_max,
         )
 
     resp = await with_openai_retry(_call, label=f"seg_line_{segment_index}")
@@ -253,7 +257,10 @@ async def visual_summary_from_timeline(
         }
         for s in segments
     ]
-    payload = json.dumps({"segments": slim_segs, "commentary_lines": lines}, indent=2)
+    payload = json.dumps(
+        {"segments": slim_segs, "commentary_lines": lines},
+        separators=(",", ":"),
+    )
     prompt = f"""An earlier vision pass wrote this visual_summary (it may not match the final play-by-play):
 \"\"\"{(prior_summary or "").strip()}\"\"\"
 
@@ -269,12 +276,14 @@ Rules:
 
     client = AsyncOpenAI()
 
+    _vs_max = max(120, min(512, int(os.getenv("OPENAI_VISUAL_SUMMARY_MAX_TOKENS", "240"))))
+
     async def _call():
         return await client.chat.completions.create(
             model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.35,
-            max_tokens=280,
+            max_tokens=_vs_max,
         )
 
     resp = await with_openai_retry(_call, label="visual_summary_align")

@@ -4,7 +4,7 @@ import UploadZone from "@/components/UploadZone";
 import ResultsPanel from "@/components/ResultsPanel";
 import {
   uploadAndAnalyzeStream,
-  useDirectBackend,
+  hasDirectBackend,
   type AnalysisResult,
   type PossessionSegment,
 } from "@/lib/analysis";
@@ -37,7 +37,7 @@ const Index = () => {
     setLocalUrl(local);
     localUrlRef.current = local;
 
-    if (!useDirectBackend()) {
+    if (!hasDirectBackend()) {
       setPhase("error");
       setError("Set VITE_BACKEND_URL in .env and run npm run dev:full to enable analysis.");
       return;
@@ -108,12 +108,15 @@ const Index = () => {
           } : null);
 
         } else if (ev.type === "complete") {
+          const finalTimeline = ev.possession_timeline && ev.possession_timeline.length > 0
+            ? ev.possession_timeline
+            : segments;
           setResult({
             ...(vBase as AnalysisResult),
             visual_summary:           ev.visual_summary,
             commentary_text:          ev.commentary_text,
             segment_commentary_lines: ev.segment_commentary_lines,
-            possession_timeline:      segments,
+            possession_timeline:      finalTimeline,
             players_stats:            ev.players_stats,
             scoreboard:               ev.scoreboard    ?? (vBase as AnalysisResult).scoreboard,
             on_screen_text:           ev.on_screen_text ?? (vBase as AnalysisResult).on_screen_text,
@@ -130,8 +133,8 @@ const Index = () => {
           throw new Error(ev.message);
         }
       }
-    } catch (err: any) {
-      const raw = err?.message ?? "Something went wrong";
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : "Something went wrong";
       // Give a clear message when the backend simply isn't running
       const msg =
         raw.toLowerCase().includes("fetch") ||

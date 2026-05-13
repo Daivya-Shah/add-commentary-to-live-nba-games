@@ -164,13 +164,135 @@ def _fmt_time(sec: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def _target_frame_count(window_sec: float, *, minimum: int = 10, max_frames: int | None = None) -> int:
+    """
+    Return frame count so spacing is at most 2 seconds.
+    Uses n-1 intervals across [start, end], so n >= window/2 + 1.
+    """
+    cap = max_frames if max_frames is not None else max(8, int(os.getenv("FRAME_SAMPLE_MAX", "32")))
+    window = max(0.1, float(window_sec))
+    by_spacing = int(window / 2.0) + 1
+    return max(minimum, min(cap, by_spacing))
+
+
+def _dynamic_frame_minimum(video_path: str, base_minimum: int) -> int:
+    """
+    Increase minimum frame sampling for long landscape clips where jersey digits
+    and scorebug text are harder to read.
+    """
+    min_frames = max(1, int(base_minimum))
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        try:
+            if not cap.isOpened():
+                return min_frames
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            cap.release()
+
+        duration = (total / fps) if fps > 0 else 0.0
+        is_landscape = width > height and width >= 960
+        if is_landscape and duration >= 45:
+            return max(min_frames, 16)
+        if is_landscape and duration >= 25:
+            return max(min_frames, 14)
+        return min_frames
+    except Exception:
+        return min_frames
+
+
+JerseyCacheEntry = dict[str, str]  # {"name": ..., "team": ...}
+
+
+def _jersey_cache_key(j: Any, team: str) -> tuple[str, str]:
+    jn = _normalize_jersey(str(j).strip()) if j is not None else None
+    if not jn and j is not None:
+        jn = str(j).strip().lstrip("#") or ""
+    return (jn or "", (team or "").strip().lower())
+
+
+def _jersey_cache_set(cache: dict[tuple[str, str], JerseyCacheEntry], j: Any, team: str, name: str, tname: str) -> None:
+    key = _jersey_cache_key(j, team)
+    if not key[0] or not name or name.lower() == "unknown":
+        return
+    cache[key] = {"name": name, "team": tname}
+
+
+def _jersey_cache_get(cache: dict[tuple[str, str], JerseyCacheEntry], j: Any, team: str) -> JerseyCacheEntry | None:
+    key = _jersey_cache_key(j, team)
+    if not key[0]:
+        return None
+    hit = cache.get(key)
+    if hit:
+        return hit
+    return cache.get((key[0], ""))
+
+
+def _prior_players_flat(cache: dict[tuple[str, str], JerseyCacheEntry]) -> dict[str, JerseyCacheEntry]:
+    """Vision prompt wants jersey# → {name, team}; last entry wins if same # appears for two clubs."""
+    out: dict[str, JerseyCacheEntry] = {}
+    for (jn, _), v in cache.items():
+        if jn:
+            out[jn] = v
+    return out
+
+
+def _continuity_from_tail_segment(seg: dict[str, Any], *, duration: float) -> str:
+    """One-line summary for the next chunk’s vision prompt."""
+    if not seg or duration <= 0:
+        return ""
+    t1 = float(seg.get("t1", 1.0))
+    wall = max(0.0, min(duration, t1 * duration))
+    pn = str(seg.get("player_name", "Unknown")).strip()
+    tm = str(seg.get("team_name", "Unknown")).strip()
+    j = seg.get("jersey_number_primary")
+    jt = f"#{j}" if j not in (None, "", "unknown") else "unknown #"
+    et = str(seg.get("event_type", "Other"))
+    return (
+        f"End of prior window (~{_fmt_time(wall)}): ball-handler {pn} ({tm}), jersey {jt}, "
+        f"last labeled action: {et}."
+    )
+
+
+def _video_chunk_windows(
+    duration: float,
+    chunk_size: float,
+    threshold: float,
+    *,
+    overlap_sec: float = 0.0,
+) -> list[tuple[float, float]]:
+    """Non-overlapping when overlap_sec=0; else sliding windows with overlap (re-analyze boundary)."""
+    if duration <= threshold:
+        return [(0.0, duration)]
+    size = max(4.0, float(chunk_size))
+    ov = max(0.0, float(overlap_sec))
+    if ov >= size - 0.5:
+        ov = max(0.0, size * 0.15)
+    step = size - ov if ov > 0 else size
+    step = max(1.0, step)
+    out: list[tuple[float, float]] = []
+    t = 0.0
+    while t < duration - 0.2:
+        end = min(duration, t + size)
+        out.append((round(t, 4), round(end, 4)))
+        if end >= duration - 0.01:
+            break
+        t += step
+    return out
+
+
 def extract_frames(
     video_path: str,
     n: int = 10,
     *,
     start_sec: float = 0.0,
     end_sec: float | None = None,
-    max_width: int = 640,  # 640px + "low" detail = 85 tokens/frame, better readability than 512 "high"
+    max_width: int = 960,  # overridden below for landscape sources when higher detail helps
 ) -> list[bytes]:
     """Extract n evenly-spaced JPEG frames between start_sec and end_sec."""
     import cv2
@@ -182,6 +304,12 @@ def extract_frames(
     try:
         fps   = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if fw > fh and fw >= 1280:
+            max_width = max(max_width, int(os.getenv("FRAME_MAX_WIDTH_LANDSCAPE", "1280")))
+        else:
+            max_width = max(max_width, int(os.getenv("FRAME_MAX_WIDTH", "960")))
 
         start_f = max(0, int(start_sec * fps))
         end_f   = (int(end_sec * fps) if end_sec is not None else total) - 1
@@ -241,6 +369,7 @@ async def vision_with_openai(
     chunk_end: float | None = None,
     total_duration: float | None = None,
     prior_players: dict[str, dict] | None = None,  # jersey# → {name, team} from earlier chunks
+    chunk_continuity: str | None = None,  # who had ball at end of previous chunk (same game)
 ) -> dict[str, Any]:
     import asyncio
     from openai import AsyncOpenAI
@@ -280,9 +409,19 @@ async def vision_with_openai(
     else:
         known_ctx = ""
 
+    cont_ctx = ""
+    if chunk_continuity:
+        cont_ctx = (
+            "\n=== CONTINUITY — SAME GAME, IMMEDIATELY AFTER THE PRIOR WINDOW ===\n"
+            f"{chunk_continuity}\n"
+            "The FIRST segment(s) in this chunk MUST continue that ball-handler until the video "
+            "clearly shows a new possession (pass caught, rebound, steal, shot taken by someone else, etc.). "
+            "Do NOT reset to a different player at t0=0 unless you see a clear change in these frames.\n\n"
+        )
+
     system_prompt = (
         f"You are an NBA broadcast analyst. {nf} frames ~{frame_interval}s apart.\n"
-        f"{time_ctx}{known_ctx}"
+        f"{time_ctx}{known_ctx}{cont_ctx}"
         "STEP 1 — READ ALL ON-SCREEN TEXT FIRST (most reliable player ID):\n"
         "• Bottom chyron/graphic: shows player name + stats when they touch the ball "
         "(e.g. 'LeBron James — 32 PTS 8 REB'). This is the BEST source.\n"
@@ -290,6 +429,9 @@ async def vision_with_openai(
         "• Replay/highlight text: player name often appears.\n"
         "• Free-throw graphic: shows shooter's name.\n\n"
         "STEP 2 — READ JERSEY NUMBERS (if chyron not visible):\n"
+        "• ONLY the player TOUCHING / controlling the ball — ignore nearby defenders' numbers.\n"
+        "• NEVER use shot clock, game clock, score digits, or ad text as a jersey number.\n"
+        "• Wide landscape shots: zoom mentally on the ball-handler's chest/back; double-digit jerseys (e.g. 30) are common — do not drop a digit.\n"
         "• Read digits on front OR back of jersey — even partial (e.g. '2' of '#23').\n"
         "• Read name on jersey back if visible.\n"
         "• Note home vs away kit color to identify which team.\n\n"
@@ -306,12 +448,17 @@ async def vision_with_openai(
         '"team_name_from_visuals":null,"team_name_from_scoreboard":null,'
         '"team_colors_description":"colors","confidence":0.9,'
         '"visual_summary":"2-3 sentences citing what you read from screen",'
-        '"segments":[{"t0":0.0,"t1":1.0,"event_type":"","player_name":"","team_name":"",'
-        '"jersey_number_primary":null}],'
+        '"segments":['
+        '{"t0":0.0,"t1":0.30,"event_type":"Two-Point Shot","player_name":"Player A","team_name":"Team X","jersey_number_primary":"23"},'
+        '{"t0":0.30,"t1":0.65,"event_type":"Rebound","player_name":"Player B","team_name":"Team Y","jersey_number_primary":"11"},'
+        '{"t0":0.65,"t1":1.0,"event_type":"Two-Point Shot","player_name":"Player C","team_name":"Team Y","jersey_number_primary":"5"}'
+        '],'
         '"scoreboard":{"home_team":null,"home_score":null,"away_team":null,"away_score":null,'
         '"quarter":null,"game_clock":null,"shot_clock":null},'
         '"on_screen_text":{"game_title":null,"broadcaster":null,"player_stat_overlay":null,"other":[]}}}\n'
-        "segments: t0=0 to t1=1 no gaps, split at every possession change."
+        "CRITICAL: segments array MUST have ONE entry per possession — create a new segment every time the ball changes hands "
+        "(pass caught, rebound grabbed, steal, shot). Do NOT merge different players into one segment. "
+        "t0/t1 are 0→1 fractions of THIS chunk with no gaps or overlaps."
     )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": system_prompt}]
@@ -325,12 +472,15 @@ async def vision_with_openai(
         content.append({"type": "text", "text": label})
         content.append({"type": "image_url", "image_url": {"url": _b64_data_url(fb), "detail": img_detail}})
 
+    # Cap completion size to limit TPM; full JSON still fits typical possession timelines.
+    _v_max = max(512, min(4096, int(os.getenv("OPENAI_VISION_MAX_OUTPUT_TOKENS", "2048"))))
+
     async def _vision_call():
         return await client.chat.completions.create(
             model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": content}],
             response_format={"type": "json_object"},
-            max_tokens=1600,
+            max_tokens=_v_max,
         )
 
     resp = await with_openai_retry(_vision_call, label="vision")
@@ -376,9 +526,16 @@ async def vision_with_openai(
         valid_events,
     )
 
+    # Pull scoreboard team names to use as jersey-resolution hints.
+    # These are the most reliable team identifiers — scorebug is almost always visible.
+    sb_hints: list[str] = [
+        v for v in (scoreboard.get("home_team"), scoreboard.get("away_team"))
+        if v and str(v).strip().lower() not in ("", "unknown", "none")
+    ]
+
     nba_on = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
     if nba_on and segments:
-        await asyncio.to_thread(enrich_timeline_segments, segments)
+        await asyncio.to_thread(enrich_timeline_segments, segments, scoreboard_hints=sb_hints or None)
     if segments:
         s0 = segments[0]
         data["event_type"]  = s0["event_type"]
@@ -387,7 +544,7 @@ async def vision_with_openai(
         if s0.get("jersey_number_primary"):
             data["jersey_number_primary"] = s0["jersey_number_primary"]
     if nba_on:
-        await asyncio.to_thread(enrich_vision_with_nba_rosters, data)
+        await asyncio.to_thread(enrich_vision_with_nba_rosters, data, extra_team_hints=sb_hints or None)
 
     return {
         "event_type":    data["event_type"],
@@ -438,8 +595,9 @@ async def commentary_with_openai(
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI()
-    player_blob = json.dumps(retrieved.get("player_stats") or {}, indent=2)
-    team_blob = json.dumps(retrieved.get("team_stats") or {}, indent=2)
+    # Compact JSON saves prompt tokens (same data, no indentation).
+    player_blob = json.dumps(retrieved.get("player_stats") or {}, separators=(",", ":"))
+    team_blob = json.dumps(retrieved.get("team_stats") or {}, separators=(",", ":"))
     prompt = f"""Write 2-4 sentences of live TV basketball commentary (energetic but factual).
 
 Detected play:
@@ -456,12 +614,14 @@ Team stats JSON:
 {team_blob}
 
 Rules: If stats are empty, describe only the action. Do not fabricate specific statistics."""
+    _c_max = max(120, min(1024, int(os.getenv("OPENAI_COMMENTARY_MAX_TOKENS", "300"))))
+
     async def _commentary_call():
         return await client.chat.completions.create(
             model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
-            max_tokens=350,
+            max_tokens=_c_max,
         )
 
     resp = await with_openai_retry(_commentary_call, label="commentary")
@@ -595,7 +755,11 @@ async def persist_to_supabase(
 async def run_analyze(clip_id: str, file_url: str, commentary_temp: float) -> AnalysisResult:
     path = await download_video(file_url)
     try:
-        frames = extract_frames(path, n=int(os.getenv("FRAME_SAMPLE_COUNT", "10")))
+        duration = get_video_duration(path)
+        base_min_frames = int(os.getenv("FRAME_SAMPLE_COUNT", "10"))
+        min_frames = _dynamic_frame_minimum(path, base_min_frames)
+        n_frames = _target_frame_count(duration, minimum=min_frames)
+        frames = extract_frames(path, n=n_frames)
     finally:
         try:
             os.remove(path)
@@ -662,7 +826,7 @@ async def health() -> dict[str, str]:
 
 async def _process_local_video(path: str, clip_id: str):
     """
-    Core SSE generator — analyzes a local video file in 45-second chunks.
+    Core SSE generator — analyzes a local video file in time windows (see CHUNK_* env).
     Caller must delete the file after consuming the generator.
     """
     from timeline import (
@@ -673,17 +837,32 @@ async def _process_local_video(path: str, clip_id: str):
 
     CHUNK_THRESHOLD = float(os.getenv("CHUNK_THRESHOLD_SEC", "20"))
     CHUNK_SIZE      = float(os.getenv("CHUNK_SIZE_SEC", "15"))
+    CHUNK_OVERLAP   = float(os.getenv("CHUNK_OVERLAP_SEC", "2"))
 
     yield _sse("status", {"step": "reading", "message": "Reading video…"})
     duration = get_video_duration(path)
 
+    # Long videos + huge chunks → sparse coverage and lost mid-chunk events. Cap unless disabled.
+    if os.getenv("CHUNK_AUTO_SHRINK", "1").lower() not in ("0", "false", "no", "off"):
+        cap = float(os.getenv("CHUNK_SIZE_MAX_SEC", "18"))
+        if duration > 75 and CHUNK_SIZE > cap:
+            logger.info(
+                "CHUNK_AUTO_SHRINK: duration=%.1fs, lowering chunk %.1fs → %.1fs for accuracy",
+                duration,
+                CHUNK_SIZE,
+                cap,
+            )
+            CHUNK_SIZE = cap
+
     if duration <= CHUNK_THRESHOLD:
         chunks = [(0.0, duration)]
     else:
-        chunks, t = [], 0.0
-        while t < duration - 0.5:
-            chunks.append((t, min(duration, t + CHUNK_SIZE)))
-            t += CHUNK_SIZE
+        chunks = _video_chunk_windows(
+            duration,
+            CHUNK_SIZE,
+            CHUNK_THRESHOLD,
+            overlap_sec=CHUNK_OVERLAP if CHUNK_OVERLAP > 0 else 0.0,
+        )
     n_chunks = len(chunks)
 
     yield _sse("video_info", {"duration": round(duration, 2), "total_chunks": n_chunks})
@@ -696,11 +875,11 @@ async def _process_local_video(path: str, clip_id: str):
     best_on_screen:   dict[str, Any] | None = None
     vision_model      = "fallback"
     last_structured:  dict[str, Any] = {}
-    n_frames = int(os.getenv("FRAME_SAMPLE_COUNT", "10"))
+    base_min_frames = int(os.getenv("FRAME_SAMPLE_COUNT", "10"))
+    min_frames = _dynamic_frame_minimum(path, base_min_frames)
 
-    # Jersey → player cache: once #23 = LeBron James is seen anywhere, never call it Unknown again
-    # key = jersey number string, value = {"name": ..., "team": ...}
-    jersey_cache: dict[str, dict[str, str]] = {}
+    # Jersey → player cache keyed by (number, team_slug) so #5 home vs #5 away do not collide.
+    jersey_cache: dict[tuple[str, str], JerseyCacheEntry] = {}
 
     for chunk_idx, (c_start, c_end) in enumerate(chunks):
         label  = f"{_fmt_time(c_start)}–{_fmt_time(c_end)}"
@@ -713,7 +892,13 @@ async def _process_local_video(path: str, clip_id: str):
             "chunk_start": c_start,   "chunk_end":   c_end,
         })
 
-        frames = extract_frames(path, n=n_frames, start_sec=c_start, end_sec=c_end)
+        chunk_len = max(0.1, c_end - c_start)
+        chunk_frames = _target_frame_count(chunk_len, minimum=min_frames)
+        frames = extract_frames(path, n=chunk_frames, start_sec=c_start, end_sec=c_end)
+
+        cont: str | None = None
+        if chunk_idx > 0 and all_segments:
+            cont = _continuity_from_tail_segment(all_segments[-1], duration=duration)
 
         if os.getenv("OPENAI_API_KEY"):
             structured = await vision_with_openai(
@@ -721,7 +906,8 @@ async def _process_local_video(path: str, clip_id: str):
                 chunk_start=c_start,
                 chunk_end=c_end,
                 total_duration=duration,
-                prior_players=jersey_cache if jersey_cache else None,
+                prior_players=_prior_players_flat(jersey_cache) if jersey_cache else None,
+                chunk_continuity=cont,
             )
             vision_model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
         else:
@@ -735,21 +921,39 @@ async def _process_local_video(path: str, clip_id: str):
             nm = str(seg.get("player_name", "")).strip()
             tm = str(seg.get("team_name", "")).strip()
             if j and nm and nm.lower() not in ("unknown", ""):
-                jersey_cache[j] = {"name": nm, "team": tm}
+                _jersey_cache_set(jersey_cache, j, tm, nm, tm)
 
         # Also learn from vision-level fields (sometimes more reliable)
         primary_j = structured.get("jersey_number_primary")
         primary_nm = str(structured.get("player_name", "")).strip()
         primary_tm = str(structured.get("team_name", "")).strip()
         if primary_j and primary_nm and primary_nm.lower() not in ("unknown", ""):
-            jersey_cache[primary_j] = {"name": primary_nm, "team": primary_tm}
+            _jersey_cache_set(jersey_cache, primary_j, primary_tm, primary_nm, primary_tm)
 
         c_dur = max(c_end - c_start, 0.001)
         global_segs: list[dict[str, Any]] = []
-        for seg in (structured.get("segments") or []):
-            t0g = (c_start + seg["t0"] * c_dur) / duration
-            t1g = (c_start + seg["t1"] * c_dur) / duration
-            global_segs.append({**seg, "t0": round(t0g, 6), "t1": round(t1g, 6)})
+        trim_from = c_start + (CHUNK_OVERLAP if chunk_idx > 0 and CHUNK_OVERLAP > 0 else 0.0)
+        raw_segs = structured.get("segments") or []
+
+        def _to_global(segs: list[dict[str, Any]], *, apply_trim: bool) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for seg in segs:
+                t0g = (c_start + seg["t0"] * c_dur) / duration
+                t1g = (c_start + seg["t1"] * c_dur) / duration
+                if apply_trim and chunk_idx > 0 and CHUNK_OVERLAP > 0:
+                    wall_t0 = t0g * duration
+                    if wall_t0 < trim_from - 0.05:
+                        continue
+                out.append({**seg, "t0": round(t0g, 6), "t1": round(t1g, 6)})
+            return out
+
+        global_segs = _to_global(raw_segs if isinstance(raw_segs, list) else [], apply_trim=True)
+        if chunk_idx > 0 and CHUNK_OVERLAP > 0 and not global_segs and raw_segs:
+            logger.warning(
+                "Chunk %s: overlap trim removed all segments; using full chunk (possible duplicate boundary)",
+                chunk_idx,
+            )
+            global_segs = _to_global(raw_segs, apply_trim=False)
 
         sb = structured.get("scoreboard")
         if sb and (sb.get("home_score") is not None or sb.get("away_score") is not None):
@@ -789,8 +993,9 @@ async def _process_local_video(path: str, clip_id: str):
         # Never let a segment overwrite the cache — roster-resolved names win.
         for seg in global_segs:
             j = seg.get("jersey_number_primary")
-            if j and jersey_cache.get(j):
-                cached = jersey_cache[j]
+            st = str(seg.get("team_name", "") or "")
+            cached = _jersey_cache_get(jersey_cache, j, st) if j else None
+            if cached:
                 if not seg.get("player_name") or seg["player_name"].lower() == "unknown":
                     seg["player_name"] = cached["name"]
                     seg["team_name"]   = cached["team"]
@@ -803,9 +1008,11 @@ async def _process_local_video(path: str, clip_id: str):
         # Retroactively patch already-emitted segments whose jersey is now resolved
         for prev_seg in all_segments[-20:]:
             pj = prev_seg.get("jersey_number_primary")
-            if pj and jersey_cache.get(pj) and prev_seg.get("player_name", "").lower() == "unknown":
-                prev_seg["player_name"] = jersey_cache[pj]["name"]
-                prev_seg["team_name"]   = jersey_cache[pj]["team"]
+            pst = str(prev_seg.get("team_name", "") or "")
+            pc = _jersey_cache_get(jersey_cache, pj, pst) if pj else None
+            if pc and prev_seg.get("player_name", "").lower() == "unknown":
+                prev_seg["player_name"] = pc["name"]
+                prev_seg["team_name"]   = pc["team"]
 
         base_i = len(all_segments)
         for i, (seg, line) in enumerate(zip(global_segs, chunk_lines)):
@@ -826,6 +1033,32 @@ async def _process_local_video(path: str, clip_id: str):
                     "player_stats":  ctx.get("player_stats") or {},
                     "team_stats":    ctx.get("team_stats")   or {},
                 })
+
+    # Final cleanup: use the full jersey_cache + best scoreboard to resolve any
+    # Unknown players that slipped through per-chunk enrichment (e.g. first chunk
+    # had no scoreboard yet but a later chunk identified the teams).
+    sb_final_hints: list[str] = [
+        v for v in (
+            (best_scoreboard or {}).get("home_team"),
+            (best_scoreboard or {}).get("away_team"),
+        )
+        if v and str(v).strip().lower() not in ("", "unknown", "none")
+    ]
+    nba_on_final = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
+    if nba_on_final:
+        import asyncio as _asyncio
+        await _asyncio.to_thread(
+            enrich_timeline_segments,
+            [s for s in all_segments if s.get("player_name", "").lower() == "unknown"],
+            scoreboard_hints=sb_final_hints or None,
+        )
+    for seg in all_segments:
+        j = seg.get("jersey_number_primary")
+        st = str(seg.get("team_name", "") or "")
+        hit = _jersey_cache_get(jersey_cache, j, st) if j else None
+        if hit and seg.get("player_name", "").lower() == "unknown":
+            seg["player_name"] = hit["name"]
+            seg["team_name"]   = hit["team"]
 
     sample_segs  = (all_segments[:3] + all_segments[-3:]) if len(all_segments) > 6 else all_segments
     sample_lines = (all_lines[:3]    + all_lines[-3:])    if len(all_lines)    > 6 else all_lines
@@ -858,6 +1091,7 @@ async def _process_local_video(path: str, clip_id: str):
     yield _sse("complete", {
         "commentary_text":          full_result.commentary_text,
         "segment_commentary_lines": all_lines,
+        "possession_timeline":      all_segments,
         "visual_summary":           visual_summary,
         "players_stats":            all_players_stats,
         "scoreboard":               best_scoreboard,
@@ -935,6 +1169,24 @@ class FrameRequest(BaseModel):
     prev_player: str | None = None   # previous ball-handler for continuity
     prev_jersey: str | None = None
     prev_team:   str | None = None
+    prev_confidence: float | None = None
+    prev_event: str | None = None
+    prev_ball_state: str | None = None
+
+
+def _is_unknown_name(value: str | None) -> bool:
+    return not value or str(value).strip().lower() in {"", "unknown", "none", "n/a"}
+
+
+def _normalize_jersey(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = str(value).strip().lstrip("#").strip()
+    if not cleaned:
+        return None
+    # Keep compact alnum token, but prefer numeric jersey content.
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return digits or cleaned
 
 
 class PlayerStatsRequest(BaseModel):
@@ -969,15 +1221,24 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
         "- Just shot → shooter\n"
         "- Pass in air → passer\n"
         "- Catching → receiver\n"
-        "- Loose/not visible → Unknown\n\n"
-        "Read jersey number (front or back). Read scorebug if visible.\n\n"
+        "- Loose on floor or no clear handler → player_name='Unknown'\n\n"
+        "IMPORTANT:\n"
+        "- If you can clearly see a NEW player with control, switch directly to that player.\n"
+        "- Do not keep prior holder when visual evidence shows transfer.\n"
+        "- If no player clearly controls the ball, mark Unknown and set ball_state accordingly.\n\n"
+        "Read jersey ONLY on the ball-handler's uniform (not other players). Never use shot/game clock digits as a jersey.\n"
+        "On wide shots, read both digits of two-digit numbers (e.g. 30 not 3 or 5).\n"
+        "Read scorebug if visible.\n\n"
         "JSON only:\n"
         '{"player_name":"Name or Unknown","jersey_number":"# or null","team_name":"team or Unknown",'
         f'"event_type":"one of {EVENT_TYPES}","confidence":0.0-1.0,'
+        '"ball_state":"in_hand|in_air|loose_on_floor|out_of_frame",'
         '"commentary":"max 10 words broadcast style",'
         '"scoreboard":{"home_team":null,"home_score":null,"away_team":null,"away_score":null,"quarter":null,"game_clock":null,"shot_clock":null},'
         '"on_screen_text":{"game_title":null,"broadcaster":null,"player_stat_overlay":null,"other":[]}}'
     )
+
+    _f_max = max(64, min(256, int(os.getenv("OPENAI_FRAME_MAX_OUTPUT_TOKENS", "100"))))
 
     async def _call():
         return await client.chat.completions.create(
@@ -986,11 +1247,11 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/jpeg;base64,{img_b64}",
-                    "detail": os.getenv("LIVE_FRAME_IMAGE_DETAIL", "low"),
+                    "detail": os.getenv("LIVE_FRAME_IMAGE_DETAIL", "auto"),
                 }},
             ]}],
             response_format={"type": "json_object"},
-            max_tokens=200,  # short response = faster
+            max_tokens=_f_max,
         )
 
     resp = await with_openai_retry(_call, label="frame_analysis")
@@ -998,7 +1259,7 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
     data: dict[str, Any] = json.loads(raw)
 
     player  = str(data.get("player_name", "Unknown")).strip() or "Unknown"
-    jersey  = str(data.get("jersey_number") or "").strip() or None
+    jersey  = _normalize_jersey(str(data.get("jersey_number") or "").strip() or None)
     team    = str(data.get("team_name", "Unknown")).strip() or "Unknown"
     event   = data.get("event_type", "Other")
     if event not in EVENT_TYPES:
@@ -1008,16 +1269,51 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
     except (TypeError, ValueError):
         conf = 0.5
 
+    # Stabilize live playback tracking:
+    # if this frame is uncertain/Unknown, preserve previous holder when available.
+    prev_player = (body.prev_player or "").strip()
+    prev_team = (body.prev_team or "").strip()
+    prev_jersey = _normalize_jersey((body.prev_jersey or "").strip() or None)
+    prev_conf = float(body.prev_confidence) if body.prev_confidence is not None else None
+    prev_event = (body.prev_event or "").strip()
+    prev_ball_state = (body.prev_ball_state or "").strip()
+    ball_state = str(data.get("ball_state", "in_hand")).strip() or "in_hand"
+    uncertain_holder = _is_unknown_name(player) or conf < 0.45
+
+    # Confidence gate for live switching:
+    # require stronger evidence to replace a known holder unless event/ball-state implies a clear transfer.
+    transfer_event = event in {"Assist", "Rebound", "Turnover", "Block", "Layup or Dunk", "Two-Point Shot", "Three-Point Shot"}
+    transfer_ball_state = ball_state in {"in_air", "loose_on_floor"}
+    has_prev_holder = not _is_unknown_name(prev_player)
+    switched_holder = has_prev_holder and not _is_unknown_name(player) and player.lower() != prev_player.lower()
+    strong_switch = conf >= 0.62 or transfer_event or transfer_ball_state
+
+    if switched_holder and not strong_switch:
+        player = prev_player
+        team = prev_team or team
+        jersey = prev_jersey or jersey
+        conf = max(conf, prev_conf or 0.5)
+        event = prev_event or event
+        ball_state = prev_ball_state or ball_state
+
+    if uncertain_holder and not _is_unknown_name(prev_player):
+        player = prev_player
+        team = prev_team or team
+        jersey = prev_jersey or jersey
+        conf = max(conf, prev_conf or 0.46)
+
     # Run roster lookup synchronously so the response already has the correct name.
     # Roster is cached per team for 45 min so only the first call per team is slow.
     nba_on = os.getenv("NBA_ROSTER_LOOKUP", "1").lower() not in ("0", "false", "no", "off")
     if nba_on and jersey and team.lower() != "unknown":
+        raw_sb = data.get("scoreboard") or {}
+        sb_team_hint = raw_sb.get("home_team") or raw_sb.get("away_team")
         work = {
             "player_name": player,
             "team_name":   team,
             "jersey_number_primary":    jersey,
             "team_name_from_visuals":   team,
-            "team_name_from_scoreboard": (data.get("scoreboard") or {}).get("home_team"),
+            "team_name_from_scoreboard": sb_team_hint,
             "confidence":   conf,
             "visual_summary": "",
         }
@@ -1053,11 +1349,38 @@ async def _quick_frame_analysis(body: FrameRequest) -> dict[str, Any]:
         "jersey_number": jersey,
         "team_name":    team,
         "event_type":   event,
+        "ball_state":   ball_state,
         "confidence":   round(max(0.0, min(1.0, conf)), 3),
         "commentary":   str(data.get("commentary", "")).strip(),
         "scoreboard":   scoreboard if has_sb  else None,
         "on_screen_text": on_screen if has_ost else None,
         "timestamp":    body.timestamp,
+    }
+
+
+def _frame_rate_limited_fallback(body: FrameRequest) -> dict[str, Any]:
+    """Return a stable fallback response when frame analysis is rate-limited."""
+    fallback_player = (body.prev_player or "").strip() or "Unknown"
+    fallback_team = (body.prev_team or "").strip() or "Unknown"
+    fallback_event = (body.prev_event or "").strip() or "Other"
+    fallback_state = (body.prev_ball_state or "").strip() or "out_of_frame"
+    conf = body.prev_confidence if body.prev_confidence is not None else 0.3
+    try:
+        conf = float(conf)
+    except (TypeError, ValueError):
+        conf = 0.3
+    return {
+        "player_name": fallback_player,
+        "jersey_number": _normalize_jersey(body.prev_jersey),
+        "team_name": fallback_team,
+        "event_type": fallback_event if fallback_event in EVENT_TYPES else "Other",
+        "ball_state": fallback_state,
+        "confidence": round(max(0.0, min(1.0, conf)), 3),
+        "commentary": "Rate-limited; using previous holder.",
+        "scoreboard": None,
+        "on_screen_text": None,
+        "timestamp": body.timestamp,
+        "rate_limited": True,
     }
 
 
@@ -1069,6 +1392,9 @@ async def analyze_frame(body: FrameRequest) -> dict[str, Any]:
     try:
         return await _quick_frame_analysis(body)
     except Exception as e:
+        msg = str(e)
+        if "rate limit" in msg.lower() or "rate_limit_exceeded" in msg.lower():
+            return _frame_rate_limited_fallback(body)
         logger.exception("analyze-frame failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
 

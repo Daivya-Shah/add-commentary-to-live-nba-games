@@ -66,6 +66,9 @@ export interface FrameRequest {
   prev_player?: string | null;
   prev_jersey?: string | null;
   prev_team?: string | null;
+  prev_confidence?: number | null;
+  prev_event?: string | null;
+  prev_ball_state?: string | null;
 }
 
 export interface FrameResult {
@@ -73,6 +76,8 @@ export interface FrameResult {
   jersey_number: string | null;
   team_name: string;
   event_type: string;
+  ball_state?: "in_hand" | "in_air" | "loose_on_floor" | "out_of_frame" | string;
+  rate_limited?: boolean;
   confidence: number;
   commentary: string;
   scoreboard?: ScoreboardInfo | null;
@@ -134,6 +139,7 @@ export type StreamEvent =
       type: "complete";
       commentary_text: string;
       segment_commentary_lines: string[];
+      possession_timeline?: PossessionSegment[];
       visual_summary: string;
       players_stats: PlayerContext[];
       scoreboard?: ScoreboardInfo | null;
@@ -185,7 +191,7 @@ export async function* uploadAndAnalyzeStream(
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: file,          // Browser streams the file; never fully buffered in JS
-      // @ts-ignore — duplex needed for streaming uploads in some environments
+      // @ts-expect-error -- duplex is supported by browsers for streaming uploads, but not in all TS DOM typings.
       duplex: "half",
     });
   } catch {
@@ -276,7 +282,7 @@ async function analyzeEdge(
   return payload as AnalysisResult;
 }
 
-export function useDirectBackend(): boolean {
+export function hasDirectBackend(): boolean {
   return Boolean(import.meta.env.VITE_BACKEND_URL?.trim());
 }
 
@@ -285,7 +291,7 @@ export async function runAnalysisPipeline(
   fileUrl: string,
   action?: "regenerate"
 ): Promise<AnalysisResult> {
-  if (useDirectBackend()) return analyzeDirect(clipId, fileUrl, action);
+  if (hasDirectBackend()) return analyzeDirect(clipId, fileUrl, action);
   return analyzeEdge(clipId, fileUrl, action);
 }
 
