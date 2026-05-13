@@ -659,9 +659,10 @@ const LiveReplay = () => {
   const currentStreamPill = streamPill[streamStatus];
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="local-minima-bg flex min-h-screen flex-col text-foreground">
       <Masthead
         breadcrumb="01 / LIVE REPLAY"
+        className="border-white/15 bg-transparent backdrop-blur-md"
         rightSlot={
           <span
             className={cn(
@@ -681,9 +682,9 @@ const LiveReplay = () => {
         }
       />
 
-      <main className="mx-auto w-full max-w-[1400px] min-w-0 px-4 pb-12 pt-6 sm:px-6 sm:pt-8 lg:px-8">
+      <main className="mx-auto w-full max-w-[1400px] min-w-0 px-6 pb-16 pt-10 sm:px-10 sm:pt-14">
         {!backendReady && (
-          <div className="mb-8 flex items-start gap-4 border-y border-court/60 py-4">
+          <div className="live-desk-panel mb-8 flex items-start gap-4 px-5 py-4">
             <AlertTriangle className="mt-0.5 h-4 w-4 text-court" />
             <div>
               <Marker tone="accent">BACKEND REQUIRED</Marker>
@@ -698,18 +699,21 @@ const LiveReplay = () => {
           /* PREFLIGHT — setup is the hero */
           <>
             <section>
-              <h1 className="max-w-full break-words font-display text-6xl leading-[0.85] sm:text-8xl lg:text-[120px]">
+              <h1 className="title-gradient max-w-full break-words text-center font-display text-[clamp(56px,8.8vw,108px)] leading-[0.9]">
                 REPLAY,
                 <br />
                 CALLED <span className="text-court">LIVE.</span>
               </h1>
+              <p className="mx-auto mt-4 max-w-[760px] text-center font-body text-sm italic text-foreground/80 sm:text-base">
+                A broadcast desk for syncing replay video with NBA feed context and real-time generated calls.
+              </p>
             </section>
 
             {/* A / SOURCE */}
             <section className="mt-12">
               <Rule label="A / SOURCE" marker={mode === "youtube" ? "YOUTUBE FEED" : "REPLAY VIDEO"} />
-              <div className="mt-6 max-w-3xl space-y-4">
-                <div className="grid grid-cols-3 border border-foreground/40">
+              <div className="live-desk-panel mt-6 max-w-3xl space-y-4 p-5 sm:p-6">
+                <div className="grid grid-cols-3 overflow-hidden rounded-[8px] border border-white/20 bg-[#050a20]/35">
                   {(["upload", "url"] as SetupMode[]).map((m) => (
                     <button
                       key={m}
@@ -718,8 +722,8 @@ const LiveReplay = () => {
                       className={cn(
                         "flex-1 py-2.5 font-mono text-[11px] uppercase tracked tabular transition-colors",
                         mode === m
-                          ? "bg-foreground text-background"
-                          : "text-foreground/55 hover:text-foreground",
+                          ? "bg-white text-[#121b42]"
+                          : "text-foreground/60 hover:bg-white/10 hover:text-foreground",
                       )}
                     >
                       {m === "upload" ? "UPLOAD FILE" : "PASTE URL"}
@@ -731,8 +735,8 @@ const LiveReplay = () => {
                     className={cn(
                       "flex items-center justify-center gap-2 py-2.5 font-mono text-[11px] uppercase tracked tabular transition-colors",
                       mode === "youtube"
-                        ? "bg-foreground text-background"
-                        : "text-foreground/55 hover:text-foreground",
+                        ? "bg-white text-[#121b42]"
+                        : "text-foreground/60 hover:bg-white/10 hover:text-foreground",
                     )}
                   >
                     <Youtube className="h-3.5 w-3.5" />
@@ -740,7 +744,7 @@ const LiveReplay = () => {
                   </button>
                 </div>
                 {mode === "upload" ? (
-                  <label className="flex cursor-pointer items-center gap-3 border border-foreground/40 px-4 py-4 transition-colors hover:border-foreground">
+                  <label className="flex cursor-pointer items-center gap-3 rounded-[8px] border border-white/25 bg-[#050a20]/30 px-4 py-4 transition-colors hover:border-white/60">
                     <UploadCloud className="h-4 w-4 shrink-0 text-foreground/70" />
                     <span className="flex-1 truncate font-mono text-[11px] uppercase tracked tabular text-foreground">
                       {videoFile ? videoFile.name : "CHOOSE REPLAY VIDEO"}
@@ -796,7 +800,7 @@ const LiveReplay = () => {
             <section className="mt-12">
               <Rule label="B / GAME" marker="NBA_API" />
               <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-                <div className="border border-foreground/25 p-5">
+                <div className="live-desk-panel p-5 sm:p-6">
                   <Marker tone="muted">SEARCH BY MATCHUP</Marker>
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1">
@@ -856,7 +860,7 @@ const LiveReplay = () => {
                       {searchingGames ? "SEARCHING" : "SEARCH"}
                     </Button>
                   </div>
-                  <div className="mt-3 grid grid-cols-2 border border-foreground/25">
+                  <div className="mt-3 grid grid-cols-2 overflow-hidden rounded-[8px] border border-white/20 bg-[#050a20]/35">
                     {(["Regular Season", "Playoffs"] as const).map((option) => (
                       <button
                         key={option}
@@ -866,7 +870,7 @@ const LiveReplay = () => {
                           "py-2 font-mono text-[10px] uppercase tracked tabular transition-colors",
                           seasonType === option
                             ? "bg-court text-ink"
-                            : "text-foreground/55 hover:text-foreground",
+                            : "text-foreground/60 hover:bg-white/10 hover:text-foreground",
                         )}
                       >
                         {option}
@@ -879,14 +883,14 @@ const LiveReplay = () => {
                     </p>
                   )}
                   {gameResults.length > 0 && (
-                    <ol className="mt-4 max-h-64 divide-y divide-foreground/15 overflow-auto border-y border-foreground/15">
+                    <ol className="mt-4 max-h-64 divide-y divide-white/10 overflow-auto rounded-[8px] border border-white/15 bg-[#050a20]/25">
                       {gameResults.map((result) => (
                         <li key={result.game_id}>
                           <button
                             type="button"
                             onClick={() => handleSelectGame(result)}
                             className={cn(
-                              "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 py-3 text-left transition-colors hover:bg-foreground/[0.04]",
+                              "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-3 text-left transition-colors hover:bg-white/[0.06]",
                               selectedGame?.game_id === result.game_id && "bg-court/10",
                             )}
                           >
@@ -909,7 +913,7 @@ const LiveReplay = () => {
                   )}
                 </div>
 
-                <div className="space-y-6">
+                <div className="live-desk-panel space-y-6 p-5 sm:p-6">
                   <div>
                     <Marker tone="muted">GAME FEED</Marker>
                     <div className="mt-3 space-y-1">
@@ -940,7 +944,7 @@ const LiveReplay = () => {
                     </p>
                   </div>
 
-                  <label className="flex items-center gap-3 border border-foreground/25 px-3 py-2 font-mono text-[10px] uppercase tracked text-foreground/60">
+                  <label className="flex items-center gap-3 rounded-[8px] border border-white/20 bg-[#050a20]/25 px-3 py-2 font-mono text-[10px] uppercase tracked text-foreground/70">
                     <input
                       type="checkbox"
                       checked={includeKnowledge}
@@ -950,7 +954,7 @@ const LiveReplay = () => {
                     Include extra player/team knowledge
                   </label>
 
-                  <div className="border-t border-foreground/40 pt-6">
+                  <div className="border-t border-white/20 pt-6">
                     <Button
                       variant="default"
                       size="lg"
@@ -998,7 +1002,7 @@ const LiveReplay = () => {
           /* BROADCAST — video + captions side-by-side */
           <>
             {/* Status strip */}
-            <section className="border-y border-foreground/40 py-3">
+            <section className="live-control-strip rounded-[10px] px-4 py-3">
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2 font-mono text-[11px] uppercase tracked tabular">
                 <span
                   className={cn(
@@ -1143,7 +1147,7 @@ const LiveReplay = () => {
                   </Stage>
 
                   {/* Inline metrics */}
-                  <div className="border-y border-foreground/40 py-3">
+                  <div className="live-desk-panel px-4 py-4">
                     <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
                       <Metric label="GAME CLOCK" value={liveClock} accent={isRunning} />
                       <Metric label="LATENCY" value={formatLatency(latestCaption?.latency_ms) || "—"} />
@@ -1161,8 +1165,8 @@ const LiveReplay = () => {
                 </div>
 
                 {/* Captions column */}
-                <div className="flex h-[640px] max-h-[calc(100vh-8rem)] min-w-0 flex-col border border-foreground/[var(--rule-alpha,0.18)]">
-                  <div className="flex items-center justify-between gap-3 border-b border-foreground/[var(--rule-alpha,0.18)] px-4 py-3">
+                <div className="live-desk-panel flex h-[640px] max-h-[calc(100vh-8rem)] min-w-0 flex-col overflow-hidden">
+                  <div className="flex items-center justify-between gap-3 border-b border-white/15 px-4 py-3">
                     <div className="flex items-baseline gap-3">
                       <Marker>D / CAPTION FEED</Marker>
                       <span
@@ -1218,13 +1222,13 @@ const LiveReplay = () => {
                         )}
                       </div>
                     ) : (
-                      <ol className="divide-y divide-foreground/[var(--rule-alpha,0.18)]">
+                      <ol className="divide-y divide-white/10">
                         {visibleCaptions.map((caption, i) => (
                           <li
                             key={caption.event_id}
                             className={cn(
                               "px-4 py-4",
-                              i === 0 && "bg-foreground/[0.04]",
+                              i === 0 && "bg-white/[0.06]",
                             )}
                           >
                             <div className="flex items-baseline justify-between gap-3 font-mono text-[10px] uppercase tracked tabular">
@@ -1263,7 +1267,7 @@ const LiveReplay = () => {
             {(warnings.length > 0 || streamError) && (
               <section className="mt-10">
                 <Rule label="E / NOTES" marker={streamError ? "STREAM" : "PROVIDER"} />
-                <div className="mt-4 space-y-2 font-mono text-[11px] uppercase tracked tabular">
+                <div className="live-desk-panel mt-4 space-y-2 p-5 font-mono text-[11px] uppercase tracked tabular">
                   {streamError && <p className="text-court">! {streamError}</p>}
                   {warnings.map((w, i) => (
                     <p key={i} className="text-foreground/65">· {w}</p>

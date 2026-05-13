@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
+import { Upload } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Marker } from "@/components/almanac";
 
 interface UploadZoneProps {
   onFileSelect: (file: File) => void;
@@ -34,57 +34,49 @@ const UploadZone = ({ onFileSelect, isProcessing }: UploadZoneProps) => {
   if (isProcessing) return null;
 
   return (
-    <div
-      className={cn(
-        "group relative w-full cursor-pointer select-none border bg-transparent transition-colors",
-        isDragOver
-          ? "border-court bg-court/5"
-          : hover
-            ? "border-foreground"
-            : "border-foreground/40",
-      )}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setIsDragOver(true);
-      }}
-      onDragLeave={() => setIsDragOver(false)}
-      onDrop={handleDrop}
-      onClick={() => document.getElementById("file-input")?.click()}
-    >
-      <input
-        id="file-input"
-        type="file"
-        accept="video/mp4,video/*"
-        className="hidden"
-        onChange={handleFileInput}
-      />
+    <div className="mx-auto w-full max-w-[1080px] select-none">
+      <div
+        className={cn(
+          "upload-glass-zone group relative cursor-pointer rounded-[10px] bg-transparent transition-all duration-300",
+          isDragOver
+            ? "shadow-[0_0_34px_rgba(224,184,248,0.52),0_0_74px_rgba(150,210,255,0.36)]"
+            : hover
+              ? "shadow-[0_0_28px_rgba(218,174,248,0.46),0_0_60px_rgba(150,210,255,0.3)]"
+              : "shadow-[0_0_22px_rgba(196,152,244,0.34)]",
+        )}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragOver(true);
+        }}
+        onDragLeave={() => setIsDragOver(false)}
+        onDrop={handleDrop}
+      >
+        <input
+          id="file-input"
+          type="file"
+          accept="video/mp4,video/*"
+          className="hidden"
+          onChange={handleFileInput}
+        />
 
-      <div className="absolute left-3 top-3">
-        <Marker tone={isDragOver ? "accent" : "muted"}>FIG.01 / DROP CLIP</Marker>
-      </div>
-      <div className="absolute right-3 top-3">
-        <Marker tone="muted">MP4 · MOV · WEBM</Marker>
-      </div>
-      <div className="absolute bottom-3 left-3">
-        <Marker tone="muted">{isDragOver ? "› RELEASE TO COMMIT" : "CLICK OR DRAG"}</Marker>
-      </div>
-      <div className="absolute bottom-3 right-3">
-        <Marker tone="muted">REC ●</Marker>
-      </div>
-
-      <div className="flex min-h-[320px] flex-col items-center justify-center gap-6 px-6 py-20 text-center">
-        <p className="font-display text-[64px] leading-[0.85] text-foreground sm:text-[88px] md:text-[112px]">
-          DROP THE
-          <br />
-          <span className={cn("transition-colors", isDragOver ? "text-court" : "text-foreground")}>
-            CLIP
-          </span>
-        </p>
-        <p className="max-w-md font-body text-sm italic text-foreground/60">
-          A single basketball play. The desk will read it, retrieve the box score, and write the call.
-        </p>
+        <div className="px-6 pb-10 pt-6 sm:px-8 sm:pb-12 sm:pt-7">
+          <div
+            className="flex min-h-[190px] flex-col items-center justify-center gap-3 rounded-[8px] border border-white/25 px-6 py-10 text-center sm:min-h-[220px]"
+            onClick={() => document.getElementById("file-input")?.click()}
+          >
+            <div className="inline-flex items-center justify-center rounded-full border border-white/70 p-5">
+              <Upload className="h-14 w-14 text-foreground" strokeWidth={2.1} />
+            </div>
+            <p className="font-body text-xs text-white sm:text-sm">
+              {isDragOver ? "RELEASE THE CLIP" : "UPLOAD THE CLIP"}
+            </p>
+            <p className="font-mono text-[9px] uppercase tracked text-white/90 sm:text-[10px]">
+              Supported formats: MP4, MOV, WEBM
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );

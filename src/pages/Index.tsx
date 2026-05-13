@@ -6,7 +6,6 @@ import UploadZone from "@/components/UploadZone";
 import ProcessingStatus, { type ProcessingStep } from "@/components/ProcessingStatus";
 import ResultsPanel from "@/components/ResultsPanel";
 import { runAnalysisPipeline, type AnalysisResult } from "@/lib/analysis";
-import { Masthead, Rule } from "@/components/almanac";
 import { usePersistentState } from "@/hooks/usePersistentState";
 
 interface OfflineAnalysisState {
@@ -91,46 +90,46 @@ const Index = () => {
   const isProcessing = !!step && step !== "complete" && step !== "error";
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <Masthead breadcrumb="00 / DESK" />
-
-      <main className="mx-auto w-full max-w-[1400px] px-6 pb-24 pt-10 sm:px-10">
-        {/* Hero */}
-        <section className="grid gap-10 lg:grid-cols-[1fr_auto] lg:items-end">
-          <div>
-            <h1 className="font-display text-[88px] leading-[0.82] sm:text-[128px] md:text-[180px]">
-              ANALYZE
-              <br />
-              <span className="text-court">THE PLAY.</span>
-            </h1>
-          </div>
+    <div className="local-minima-bg flex min-h-screen flex-col text-foreground">
+      <main className="relative mx-auto w-full max-w-[1400px] px-6 pb-12 pt-40 sm:px-10 sm:pt-48">
+        <div className="absolute right-6 top-8 flex flex-wrap items-center justify-end gap-3 sm:right-10 sm:top-10">
+          <Link
+            to="/about"
+            className="inline-flex items-center gap-2 border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background"
+          >
+            About
+          </Link>
           <Link
             to="/live"
-            className="group inline-flex items-center gap-3 self-start border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background lg:self-end"
+            className="group inline-flex items-center gap-3 border border-foreground/40 px-5 py-3 font-mono text-[11px] uppercase tracked tabular text-foreground transition-colors hover:bg-foreground hover:text-background"
           >
             <span className="h-2 w-2 animate-live-blink bg-court" aria-hidden />
-            <span>LIVE REPLAY DESK</span>
+            <span>Live Replay</span>
             <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
           </Link>
-        </section>
+        </div>
 
-        {/* Upload */}
-        <section className="mt-16">
-          <Rule label="01 / UPLOAD" marker="DROP AREA" />
-          <div className="mt-6">
-            <UploadZone onFileSelect={processVideo} isProcessing={isProcessing || !!result} />
+        <section className="grid justify-items-center gap-5 text-center">
+          <div>
+            <h1 className="title-gradient font-display text-[clamp(56px,8.8vw,96px)] leading-[0.9]">
+              VISION2VOICE
+            </h1>
+            <p className="mt-4 max-w-[760px] font-body text-sm italic text-foreground/80 sm:text-base">
+              A quiet desk for live and replay moments, where every possession can unfold into a clearer story.
+            </p>
           </div>
         </section>
 
-        {/* Processing */}
+        <section className="mt-14 sm:mt-16">
+          <UploadZone onFileSelect={processVideo} isProcessing={isProcessing || !!result} />
+        </section>
+
         {step && step !== "complete" && (
-          <section className="mt-12">
-            <Rule label="01·B / PROCESSING" marker="PIPELINE" />
+          <section className="mt-12 flex justify-center">
             <ProcessingStatus currentStep={step} error={error} />
           </section>
         )}
 
-        {/* Results */}
         {result && clipId && fileUrl && (
           <section className="mt-16">
             <ResultsPanel

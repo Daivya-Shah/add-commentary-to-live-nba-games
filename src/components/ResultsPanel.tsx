@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { DataTable, Marker, Rule, Stage } from "@/components/almanac";
+import { DataTable, Marker, Stage } from "@/components/almanac";
 
 import {
   exportCommentaryVideo,
@@ -231,13 +231,11 @@ const ResultsPanel = ({
 
   return (
     <article className="space-y-12">
-      {/* 02 — VIDEO */}
       <section>
-        <Rule label="02 / VIDEO" marker={`CLIP ${shortClipId}`} />
         <Tabs
           value={videoTab}
           onValueChange={(v) => setVideoTab(v as "original" | "voiceover")}
-          className="mt-6"
+          className="mt-0"
         >
           <div className="flex flex-wrap items-end justify-between gap-4">
             <TabsList>
@@ -374,27 +372,26 @@ const ResultsPanel = ({
         </Tabs>
       </section>
 
-      {/* 03 — METADATA */}
       <section>
-        <Rule label="03 / READ" marker="FIG.02" />
-        <dl className="mt-6 grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           <MetaCell label="EVENT" value={displayEvent} />
           <MetaCell label="PLAYER" value={displayPlayer} />
           <MetaCell label="TEAM" value={displayTeam} />
-          <MetaCell label="CONF" value={`${confidencePct}%`} accent />
+          <MetaCell label="CONF" value={`${confidencePct}%`} />
         </dl>
         {result.visual_summary && (
-          <p className="mt-6 max-w-3xl border-l border-foreground/40 pl-4 font-body text-base italic leading-relaxed text-foreground/85">
+          <p className="mt-6 max-w-3xl border-l border-white/25 pl-4 font-body text-base italic leading-relaxed text-foreground/85">
             {result.visual_summary}
           </p>
         )}
       </section>
 
-      {/* 04 — COMMENTARY */}
       <section>
-        <div className="flex items-center justify-between">
-          <Rule label="04 / COMMENTARY" marker="THE CALL" className="flex-1" />
-          <div className="ml-4 flex shrink-0 gap-2">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+          <h2 className="font-mono text-xs uppercase tracking-[0.16em] text-foreground/70 sm:text-sm">
+            COMMENTARY
+          </h2>
+          <div className="flex gap-2">
             <Button variant="ghost" size="sm" onClick={onRegenerate} disabled={isRegenerating}>
               <RefreshCw className={isRegenerating ? "animate-spin" : ""} />
               Regenerate
@@ -406,26 +403,27 @@ const ResultsPanel = ({
           </div>
         </div>
 
-        <blockquote className="mt-8 max-w-4xl">
-          <span className="block font-display text-court text-[80px] leading-none">&ldquo;</span>
-          <p className="mt-2 font-body text-2xl leading-[1.4] text-foreground sm:text-3xl">
+        <blockquote className="w-full max-w-none">
+          <p className="w-full text-pretty font-body text-2xl leading-[1.45] text-foreground sm:text-3xl">
             {result.commentary_text}
           </p>
         </blockquote>
 
         {liveLine && (
-          <div className="mt-6 flex max-w-3xl gap-4 border-t border-foreground/[var(--rule-alpha,0.18)] pt-4">
-            <Marker tone="muted">AT PLAYHEAD</Marker>
-            <p className="flex-1 font-body text-sm italic text-foreground/75">{liveLine}</p>
+          <div className="mt-8 flex w-full max-w-none flex-col gap-3 border-t border-foreground/[var(--rule-alpha,0.18)] pt-6 sm:flex-row sm:items-baseline sm:gap-6">
+            <Marker tone="muted" className="shrink-0 text-xs uppercase tracking-[0.16em] sm:text-sm">
+              AT PLAYHEAD
+            </Marker>
+            <p className="flex-1 font-body text-base italic leading-relaxed text-foreground/85 sm:text-lg md:text-xl">
+              {liveLine}
+            </p>
           </div>
         )}
       </section>
 
-      {/* 05 — BOXSCORE */}
       {(playerRows.length > 0 || teamRows.length > 0) && (
         <section>
-          <Rule label="05 / BOXSCORE" marker="RETRIEVED CONTEXT" />
-          <div className="mt-6 grid gap-10 lg:grid-cols-2">
+          <div className="grid gap-10 lg:grid-cols-2">
             {playerRows.length > 0 && (
               <DataTable
                 rows={playerRows}
@@ -450,29 +448,35 @@ const ResultsPanel = ({
         </section>
       )}
 
-      {/* 06 — RATING */}
       <section>
-        <Rule label="06 / GRADE" marker="EVAL" />
-        <div className="mt-6 flex flex-wrap items-end gap-x-10 gap-y-6">
-          <RatingInput label="FLUENCY" value={fluency} onChange={setFluency} />
-          <RatingInput label="FACTUAL" value={factual} onChange={setFactual} />
-          <RatingInput label="STYLE" value={style} onChange={setStyle} />
-        </div>
-        <Textarea
-          placeholder="Marginalia — what worked, what missed, what would a real broadcaster have said..."
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          className="mt-6"
-        />
-        <div className="mt-4">
-          <Button
-            variant="default"
-            onClick={handleSave}
-            disabled={saving || (fluency === 0 && factual === 0 && style === 0)}
-          >
-            <Save />
-            {saving ? "Logging" : "Log evaluation"}
-          </Button>
+        <div className="rounded-[10px] border border-white/15 bg-[#0a1020]/45 p-5 sm:p-6">
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+            <h2 className="font-mono text-xs uppercase tracking-[0.16em] text-foreground/70 sm:text-sm">
+              EVALUATION
+            </h2>
+            <Marker tone="muted">HUMAN GRADE</Marker>
+          </div>
+          <div className="flex flex-wrap items-end gap-x-10 gap-y-6">
+            <RatingInput label="FLUENCY" value={fluency} onChange={setFluency} />
+            <RatingInput label="FACTUAL" value={factual} onChange={setFactual} />
+            <RatingInput label="STYLE" value={style} onChange={setStyle} />
+          </div>
+          <Textarea
+            placeholder="Marginalia - what worked, what missed, what would a real broadcaster have said..."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="mt-6"
+          />
+          <div className="mt-4">
+            <Button
+              variant="default"
+              onClick={handleSave}
+              disabled={saving || (fluency === 0 && factual === 0 && style === 0)}
+            >
+              <Save />
+              {saving ? "Logging" : "Log evaluation"}
+            </Button>
+          </div>
         </div>
       </section>
     </article>
@@ -482,20 +486,13 @@ const ResultsPanel = ({
 const MetaCell = ({
   label,
   value,
-  accent = false,
 }: {
   label: string;
   value?: string | number | null;
-  accent?: boolean;
 }) => (
-  <div className="border-t border-foreground/40 pt-3">
-    <dt className="font-mono text-[10px] uppercase tracked text-foreground/55">{label}</dt>
-    <dd
-      className={cn(
-        "mt-1 font-display text-2xl leading-none sm:text-3xl",
-        accent ? "text-court" : "text-foreground",
-      )}
-    >
+  <div className="flex min-h-[128px] flex-col justify-between rounded-[10px] border border-white/15 bg-[#0a1020]/55 px-4 py-4 sm:min-h-[144px] sm:px-5 sm:py-5">
+    <dt className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/65">{label}</dt>
+    <dd className="mt-3 break-words font-display text-xl leading-[1.15] text-white sm:text-2xl lg:text-[1.65rem]">
       {value ?? "—"}
     </dd>
   </div>

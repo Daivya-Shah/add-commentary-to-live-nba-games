@@ -1,6 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { ThemeToggle } from "./ThemeToggle";
 
 interface MastheadProps {
   breadcrumb?: string;
@@ -34,7 +33,6 @@ export function Masthead({ rightSlot, className }: MastheadProps) {
 
         <div className="flex shrink-0 items-center gap-2 sm:gap-4">
           {rightSlot}
-          <ThemeToggle />
         </div>
       </div>
     </header>

@@ -1,4 +1,36 @@
-@import url('https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@font-face {
+  font-family: 'Ranade';
+  src: url('/fonts/Ranade-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ranade';
+  src: url('/fonts/Ranade-Medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ranade';
+  src: url('/fonts/Ranade-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ranade';
+  src: url('/fonts/Ranade-Italic.otf') format('opentype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 @tailwind base;
 @tailwind components;
@@ -8,18 +40,18 @@
   :root {
     --radius: 0;
 
-    --primary: 16 100% 54%;
+    --primary: 220 100% 89%;
     --primary-foreground: 0 0% 4%;
-    --accent: 16 100% 54%;
+    --accent: 220 100% 89%;
     --accent-foreground: 0 0% 4%;
     --destructive: 0 72% 55%;
     --destructive-foreground: 42 33% 92%;
-    --ring: 16 100% 54%;
+    --ring: 220 100% 89%;
   }
 
   [data-theme="dark"] {
     --background: 0 0% 4%;
-    --foreground: 42 33% 89%;
+    --foreground: 0 0% 100%;
 
     --card: 0 0% 4%;
     --card-foreground: 42 33% 89%;
@@ -31,21 +63,21 @@
     --secondary-foreground: 42 33% 89%;
 
     --muted: 0 0% 9%;
-    --muted-foreground: 42 20% 60%;
+    --muted-foreground: 265 13% 65%;
 
-    --border: 42 33% 89%;
-    --input: 42 33% 89%;
+    --border: 40 39% 92%;
+    --input: 40 39% 92%;
 
-    --rule-alpha: 0.18;
+    --rule-alpha: 0.25;
 
     --sidebar-background: 0 0% 4%;
     --sidebar-foreground: 42 33% 89%;
-    --sidebar-primary: 16 100% 54%;
+    --sidebar-primary: 220 100% 89%;
     --sidebar-primary-foreground: 0 0% 4%;
     --sidebar-accent: 0 0% 9%;
     --sidebar-accent-foreground: 42 33% 89%;
     --sidebar-border: 42 33% 89%;
-    --sidebar-ring: 16 100% 54%;
+    --sidebar-ring: 220 100% 89%;
 
     color-scheme: dark;
   }
@@ -73,12 +105,12 @@
 
     --sidebar-background: 42 33% 92%;
     --sidebar-foreground: 0 0% 4%;
-    --sidebar-primary: 16 100% 54%;
+    --sidebar-primary: 220 100% 89%;
     --sidebar-primary-foreground: 42 33% 92%;
     --sidebar-accent: 42 25% 86%;
     --sidebar-accent-foreground: 0 0% 4%;
     --sidebar-border: 0 0% 4%;
-    --sidebar-ring: 16 100% 54%;
+    --sidebar-ring: 220 100% 89%;
 
     color-scheme: light;
   }
@@ -97,7 +129,8 @@
   }
 
   body {
-    @apply font-body antialiased;
+    @apply antialiased;
+    font-family: 'Ranade', 'Archivo', 'Inter', 'Arial', sans-serif;
     font-feature-settings: "ss01", "kern";
   }
 
@@ -119,24 +152,24 @@
 
 @layer utilities {
   .font-display {
-    font-family: '"Big Shoulders Display"', Impact, sans-serif;
-    font-weight: 800;
-    letter-spacing: 0;
-    line-height: 0.85;
+    font-family: 'Ranade', 'Archivo', 'Inter', 'Arial', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    line-height: 0.9;
     text-transform: uppercase;
   }
   .font-body {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: 'Ranade', 'Archivo', 'Inter', 'Arial', sans-serif;
   }
   .font-mono {
-    font-family: '"JetBrains Mono"', ui-monospace, monospace;
+    font-family: 'Ranade', 'Archivo', 'Inter', 'Arial', sans-serif;
   }
   .tabular {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum";
   }
   .tracked {
-    letter-spacing: 0.14em;
+    letter-spacing: 0.18em;
   }
   .tracked-tight {
     letter-spacing: 0.06em;
@@ -158,5 +191,147 @@
     background-size: 3px 3px;
     pointer-events: none;
     mix-blend-mode: overlay;
+  }
+  .local-minima-bg {
+    --background: 0 0% 4%;
+    --foreground: 0 0% 100%;
+    --card: 0 0% 4%;
+    --card-foreground: 42 33% 89%;
+    --popover: 0 0% 6%;
+    --popover-foreground: 42 33% 89%;
+    --secondary: 0 0% 9%;
+    --secondary-foreground: 42 33% 89%;
+    --muted: 0 0% 9%;
+    --muted-foreground: 265 13% 65%;
+    --border: 40 39% 92%;
+    --input: 40 39% 92%;
+    --primary: 220 100% 89%;
+    --primary-foreground: 0 0% 4%;
+    --accent: 220 100% 89%;
+    --accent-foreground: 0 0% 4%;
+    --ring: 220 100% 89%;
+    --rule-alpha: 0.25;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background: linear-gradient(to right, #000000, #152331);
+  }
+  .local-minima-bg > * {
+    position: relative;
+    z-index: 1;
+  }
+  .upload-glass-zone {
+    isolation: isolate;
+    background:
+      radial-gradient(130% 100% at 18% 16%, rgba(240, 172, 247, 0.18), transparent 52%),
+      radial-gradient(88% 78% at 80% 76%, rgba(172, 247, 240, 0.2), transparent 62%),
+      linear-gradient(165deg, rgba(201, 174, 247, 0.24) 0%, rgba(184, 217, 247, 0.2) 56%, rgba(180, 245, 221, 0.2) 100%);
+  }
+  .upload-glass-zone::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    padding: 2.2px;
+    background: linear-gradient(
+      140deg,
+      rgba(252, 232, 255, 0.98) 0%,
+      rgba(248, 205, 218, 0.92) 26%,
+      rgba(198, 224, 255, 0.84) 62%,
+      rgba(175, 206, 255, 0.8) 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    filter: blur(0.12px);
+    opacity: 1;
+  }
+  .upload-glass-zone::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+      0 0 30px rgba(236, 194, 250, 0.62),
+      0 0 84px rgba(162, 216, 255, 0.38),
+      inset 0 0 0 1.2px rgba(255, 248, 255, 0.54),
+      inset 0 0 0 3px rgba(184, 206, 255, 0.28),
+      inset 0 1px 2px rgba(255, 255, 255, 0.55),
+      inset 0 -8px 22px rgba(128, 146, 210, 0.34);
+  }
+  .btn-grad {
+    background: rgba(16, 24, 56, 0.62);
+    margin: 10px;
+    padding: 15px 45px;
+    text-align: center;
+    text-transform: uppercase;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+    color: #fff;
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    display: block;
+    outline: none;
+    border: 1.5px solid rgba(255, 255, 255, 0.26);
+    letter-spacing: 0.08em;
+    line-height: 1;
+  }
+  .btn-grad-eq {
+    width: 100%;
+    margin: 0;
+  }
+  .btn-grad:hover {
+    background: rgba(22, 33, 74, 0.74);
+    color: #fff;
+    text-decoration: none;
+  }
+  .btn-grad:active {
+    background: rgba(30, 44, 93, 0.82);
+  }
+  .btn-grad-active {
+    background: rgba(255, 255, 255, 0.94);
+    color: #121b42;
+    border-color: rgba(255, 255, 255, 0.94);
+    box-shadow: none;
+  }
+  .title-gradient {
+    background: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: #ffffff;
+  }
+  .about-line {
+    opacity: 0;
+    transform: translateY(6px);
+    animation: about-line-reveal 1100ms ease forwards;
+    background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.96), rgba(201, 219, 255, 0.9));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+
+  @keyframes about-line-reveal {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .live-desk-panel {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 10px;
+    background:
+      radial-gradient(120% 110% at 10% 0%, rgba(240, 172, 247, 0.12), transparent 52%),
+      linear-gradient(160deg, rgba(10, 16, 32, 0.72), rgba(12, 26, 42, 0.58));
+    box-shadow:
+      0 0 40px rgba(118, 160, 220, 0.12),
+      inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  }
+  .live-control-strip {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(10, 16, 32, 0.48);
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.08);
   }
 }
